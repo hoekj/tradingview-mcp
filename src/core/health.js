@@ -189,6 +189,20 @@ export async function launch({ port, kill_existing } = {}) {
     if (p && existsSync(p)) { tvPath = p; break; }
   }
 
+  let storeError = null;
+  if (!tvPath && platform === 'win32') {
+    try {
+      const out = execSync(
+        'powershell -NoProfile -Command "(Get-AppxPackage -Name TradingView.Desktop).InstallLocation"',
+        { timeout: 15000 }
+      ).toString();
+      for (const loc of out.split(/\r?\n/).map(s => s.trim()).filter(Boolean)) {
+        const candidate = `${loc}\\TradingView.exe`;
+        if (existsSync(candidate)) { tvPath = candidate; break; }
+      }
+    } catch (err) { storeError = err.message; }
+  }
+
   if (!tvPath) {
     try {
       const cmd = platform === 'win32' ? 'where TradingView.exe' : 'which tradingview';
@@ -208,7 +222,8 @@ export async function launch({ port, kill_existing } = {}) {
   }
 
   if (!tvPath) {
-    throw new Error(`TradingView not found on ${platform}. Searched: ${candidates.join(', ')}. Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
+    const storeNote = storeError ? ` Store lookup failed: ${storeError}.` : '';
+    throw new Error(`TradingView not found on ${platform}. Searched: ${candidates.join(', ')}.${storeNote} Launch manually with: /path/to/TradingView --remote-debugging-port=${cdpPort}`);
   }
 
   if (killFirst) {
