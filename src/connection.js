@@ -6,6 +6,22 @@ const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
 const MAX_RETRIES = 5;
 const BASE_DELAY = 500;
+const DEFAULT_TIMEOUT_MS = Number(process.env.TVMCP_TIMEOUT_MS) || 15000;
+const CONNECT_TIMEOUT_MS = Number(process.env.TVMCP_CONNECT_TIMEOUT_MS) || 10000;
+
+/**
+ * Reject if the promise does not settle within `ms`. The underlying operation
+ * is not cancelled (CDP has no generic cancel), but the caller gets a clear
+ * error instead of hanging forever — e.g. when the renderer is blocked by a
+ * native dialog or a detached window.
+ */
+export function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 // Known direct API paths discovered via live probing (see PROBE_RESULTS.md)
 const KNOWN_PATHS = {
@@ -51,7 +67,11 @@ export async function getClient() {
   if (client) {
     try {
       // Quick liveness check
-      await client.Runtime.evaluate({ expression: '1', returnByValue: true });
+      await withTimeout(
+        client.Runtime.evaluate({ expression: '1', returnByValue: true }),
+        3000,
+        'CDP liveness check'
+      );
       return client;
     } catch {
       client = null;
@@ -70,12 +90,18 @@ export async function connect() {
         throw new Error('No TradingView chart target found. Is TradingView open with a chart?');
       }
       targetInfo = target;
-      client = await CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id });
+      client = await withTimeout(
+        CDP({ host: CDP_HOST, port: CDP_PORT, target: target.id }),
+        CONNECT_TIMEOUT_MS,
+        'CDP connect'
+      );
 
       // Enable required domains
-      await client.Runtime.enable();
-      await client.Page.enable();
-      await client.DOM.enable();
+      await withTimeout(
+        Promise.all([client.Runtime.enable(), client.Page.enable(), client.DOM.enable()]),
+        CONNECT_TIMEOUT_MS,
+        'CDP domain enable'
+      );
 
       return client;
     } catch (err) {
@@ -88,7 +114,7 @@ export async function connect() {
 }
 
 async function findChartTarget() {
-  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`);
+  const resp = await fetch(`http://${CDP_HOST}:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(5000) });
   const targets = await resp.json();
   // Prefer targets with tradingview.com/chart in the URL
   return targets.find(t => t.type === 'page' && /tradingview\.com\/chart/i.test(t.url))
@@ -105,12 +131,17 @@ export async function getTargetInfo() {
 
 export async function evaluate(expression, opts = {}) {
   const c = await getClient();
-  const result = await c.Runtime.evaluate({
-    expression,
-    returnByValue: true,
-    awaitPromise: opts.awaitPromise ?? false,
-    ...opts,
-  });
+  const { timeoutMs, ...cdpOpts } = opts;
+  const result = await withTimeout(
+    c.Runtime.evaluate({
+      expression,
+      returnByValue: true,
+      awaitPromise: cdpOpts.awaitPromise ?? false,
+      ...cdpOpts,
+    }),
+    timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    'CDP Runtime.evaluate'
+  );
   if (result.exceptionDetails) {
     const msg = result.exceptionDetails.exception?.description
       || result.exceptionDetails.text
