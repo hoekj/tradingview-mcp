@@ -77,10 +77,13 @@ register('pine', {
       handler: () => core.save(),
     }],
     ['new', {
-      description: 'Create a new blank Pine Script (indicator, strategy, library)',
+      description: 'Create a new blank Pine Script as a real saved slot (indicator, strategy, library)',
+      options: {
+        name: { type: 'string', short: 'n', description: 'Name for the new script' },
+      },
       handler: (opts, positionals) => {
         const type = positionals[0] || 'indicator';
-        return core.newScript({ type });
+        return core.newScript({ type, name: opts.name });
       },
     }],
     ['open', {
