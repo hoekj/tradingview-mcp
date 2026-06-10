@@ -47,8 +47,8 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 3. `pine_get_errors` → read compilation errors
 4. `pine_get_console` → read log.info() output
 5. `pine_get_source` → read current code back (WARNING: can be very large for complex scripts)
-6. `pine_save` → save to TradingView cloud
-7. `pine_new` → create blank indicator/strategy/library
+6. `pine_save` → save to TradingView cloud (result includes `saved_to` with the written script's name + id — heed any `warning` about slot mismatches)
+7. `pine_new` → create blank indicator/strategy/library as a NEW saved script slot (optional `name`); never overwrites the open script
 8. `pine_open` → load a saved script by name
 
 ### "Practice trading with replay"

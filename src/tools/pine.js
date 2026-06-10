@@ -25,7 +25,7 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S)', {}, async () => {
+  server.tool('pine_save', 'Save the current Pine Script (Ctrl+S). Reports which saved script slot was written (saved_to) and warns if it differs from the last opened/created script.', {}, async () => {
     try { return jsonResult(await core.save()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
@@ -35,15 +35,16 @@ export function registerPineTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes', {}, async () => {
+  server.tool('pine_smart_compile', 'Intelligent compile: detects button, compiles, checks errors, reports study changes. Reports which saved script slot was written (saved_to) and warns if it differs from the last opened/created script.', {}, async () => {
     try { return jsonResult(await core.smartCompile()); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('pine_new', 'Create a new blank Pine Script', {
+  server.tool('pine_new', 'Create a new blank Pine Script as a real saved script slot (via the editor\'s "New blank" menu + save). Subsequent saves/compiles write into this new slot, never into a pre-existing script.', {
     type: z.enum(['indicator', 'strategy', 'library']).describe('Type of script to create'),
-  }, async ({ type }) => {
-    try { return jsonResult(await core.newScript({ type })); }
+    name: z.string().optional().describe('Optional name for the new script (typed into the save dialog)'),
+  }, async ({ type, name }) => {
+    try { return jsonResult(await core.newScript({ type, name })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
