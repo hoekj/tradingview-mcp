@@ -147,6 +147,41 @@ export async function remove({ symbol }) {
   return { success: true, removed: true, symbol, matched: result.matched };
 }
 
+export async function clear({ expect_list } = {}) {
+  await ensureWatchlistOpen();
+
+  const activeList = await getActiveListName();
+  if (expect_list != null && String(expect_list).trim().toLowerCase() !== String(activeList || '').trim().toLowerCase()) {
+    return {
+      success: false,
+      error: "Active list is '" + activeList + "', expected '" + expect_list + "' — refusing to clear",
+    };
+  }
+
+  const MAX_ITERATIONS = 200;
+  let removed = 0;
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    const res = await evaluate(`
+      (function() {
+        var el = document.querySelector('[data-symbol-full]');
+        if (!el) { return { removed: false }; }
+        var row = el.closest('[class*="symbol-"]') || el.closest('[class*="row"]') || el.parentElement;
+        var btn = row ? row.querySelector('[class*="removeButton"]') : null;
+        if (!btn) { return { removed: false, reason: 'remove_button_not_found' }; }
+        btn.click();
+        return { removed: true };
+      })()
+    `);
+    if (!res?.removed) {
+      break;
+    }
+    removed++;
+    await new Promise(r => setTimeout(r, 150));
+  }
+
+  return { success: true, cleared: true, removed_count: removed, list: activeList };
+}
+
 export async function add({ symbol }) {
   // Use keyboard shortcut to open symbol search in watchlist, type symbol, press Enter
   const c = await getClient();

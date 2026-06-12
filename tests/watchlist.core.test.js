@@ -51,4 +51,36 @@ describe('watchlist core (live e2e)', () => {
     const afterHas = after.symbols.some(s => watchlist.normalizeSymbol(s.symbol) === watchlist.normalizeSymbol(testSym));
     assert.ok(!afterHas, `${testSym} absent after remove`);
   });
+
+  it('clear() refuses when expect_list does not match (non-destructive)', async () => {
+    const before = await watchlist.get();
+    const wrong = (before.active_list || 'X') + '___WRONG';
+    const res = await watchlist.clear({ expect_list: wrong });
+    assert.equal(res.success, false, 'clear refuses on mismatch');
+    assert.match(res.error, /refusing to clear/i, 'error explains refusal');
+    const after = await watchlist.get();
+    assert.equal(after.count, before.count, 'list unchanged after refused clear');
+  });
+
+  // Destructive: opt-in only. Snapshots and restores the list contents.
+  it('clear() empties the active list when name matches', async (t) => {
+    if (process.env.WATCHLIST_DESTRUCTIVE_TESTS !== '1') {
+      t.skip('set WATCHLIST_DESTRUCTIVE_TESTS=1 to run');
+      return;
+    }
+    const before = await watchlist.get();
+    const snapshot = before.symbols.map(s => s.symbol);
+    try {
+      const res = await watchlist.clear({ expect_list: before.active_list });
+      assert.equal(res.success, true, 'clear succeeds with correct name');
+      await sleep(300);
+      const after = await watchlist.get();
+      assert.equal(after.count, 0, 'list is empty after clear');
+    } finally {
+      for (const sym of snapshot) {
+        await watchlist.add({ symbol: sym });
+        await sleep(400);
+      }
+    }
+  });
 });
