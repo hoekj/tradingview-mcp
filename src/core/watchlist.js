@@ -4,6 +4,21 @@
  */
 import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
 
+// Shared in-page helper injected into evaluate() scripts. Defines removeRow(el):
+// given an element carrying [data-symbol-full], locate its row container and click
+// the per-row remove button. Returns true if a button was found and clicked, false
+// if no remove button exists (a stuck row). Inlined here (not the Node-side code)
+// because it executes in the page context via CDP and cannot reach Node functions.
+const REMOVE_ROW_SNIPPET = `
+  function removeRow(el) {
+    var row = el.closest('[class*="symbol-"]') || el.closest('[class*="row"]') || el.parentElement;
+    var btn = row ? row.querySelector('[class*="removeButton"]') : null;
+    if (!btn) { return false; }
+    btn.click();
+    return true;
+  }
+`;
+
 /**
  * Normalize a symbol for matching. Compares case-insensitively and strips the
  * exchange prefix so a caller's "AAPL" matches a row's "NASDAQ:AAPL".
@@ -117,6 +132,7 @@ export async function remove({ symbol }) {
 
   const result = await evaluate(`
     (function(symbol) {
+      ${REMOVE_ROW_SNIPPET}
       function norm(s) {
         var u = String(s).toUpperCase().trim();
         var c = u.indexOf(':');
@@ -127,10 +143,7 @@ export async function remove({ symbol }) {
       for (var i = 0; i < els.length; i++) {
         var full = els[i].getAttribute('data-symbol-full');
         if (norm(full) === target || String(full).toUpperCase() === String(symbol).toUpperCase()) {
-          var row = els[i].closest('[class*="symbol-"]') || els[i].closest('[class*="row"]') || els[i].parentElement;
-          var btn = row ? row.querySelector('[class*="removeButton"]') : null;
-          if (!btn) { return { found: true, removed: false, reason: 'remove_button_not_found' }; }
-          btn.click();
+          if (!removeRow(els[i])) { return { found: true, removed: false, reason: 'remove_button_not_found' }; }
           return { found: true, removed: true, matched: full };
         }
       }
@@ -159,27 +172,39 @@ export async function clear({ expect_list } = {}) {
   }
 
   const MAX_ITERATIONS = 200;
-  let removed = 0;
+  let removedCount = 0;
+  let stuck = false;
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await evaluate(`
       (function() {
+        ${REMOVE_ROW_SNIPPET}
         var el = document.querySelector('[data-symbol-full]');
         if (!el) { return { removed: false }; }
-        var row = el.closest('[class*="symbol-"]') || el.closest('[class*="row"]') || el.parentElement;
-        var btn = row ? row.querySelector('[class*="removeButton"]') : null;
-        if (!btn) { return { removed: false, reason: 'remove_button_not_found' }; }
-        btn.click();
+        if (!removeRow(el)) { return { removed: false, reason: 'remove_button_not_found' }; }
         return { removed: true };
       })()
     `);
     if (!res?.removed) {
+      if (res?.reason === 'remove_button_not_found') {
+        stuck = true;
+      }
       break;
     }
-    removed++;
+    removedCount++;
     await new Promise(r => setTimeout(r, 150));
   }
 
-  return { success: true, cleared: true, removed_count: removed, list: activeList };
+  if (stuck) {
+    return {
+      success: false,
+      cleared: false,
+      removed_count: removedCount,
+      list: activeList,
+      error: 'Removed ' + removedCount + ' symbol(s) but a remaining row had no remove button — list not fully cleared',
+    };
+  }
+
+  return { success: true, cleared: true, removed_count: removedCount, list: activeList };
 }
 
 export async function add({ symbol }) {
