@@ -156,13 +156,21 @@ describe('watchlist core (live e2e)', () => {
     assert.equal(res.active_list, before.active_list, 'active list is unchanged');
   });
 
-  it('select() switches to another existing list and restores', async () => {
+  it('select() matches the list name case-insensitively (non-destructive)', async () => {
+    const before = await watchlist.get();
+    const res = await watchlist.select({ name: String(before.active_list).toUpperCase() });
+    assert.equal(res.success, true, 'uppercased name still matches the active list');
+    assert.equal(res.active_list, before.active_list, 'active list is unchanged');
+  });
+
+  it('select() switches to another existing list and restores', async (t) => {
     const before = await watchlist.get();
     // Discover the available lists via the rejection path, then pick a different one.
     const probe = await watchlist.select({ name: '__definitely_not_a_real_list__' });
     const other = (probe.available || []).find(n => n.toLowerCase() !== String(before.active_list).toLowerCase());
     if (!other) {
-      return; // only one watchlist exists — nothing to switch to
+      t.skip('only one watchlist exists — nothing to switch to');
+      return;
     }
     try {
       const res = await watchlist.select({ name: other });

@@ -114,12 +114,20 @@ export async function select({ name } = {}) {
       function isListRow(r) {
         return r.hasAttribute('aria-selected') && /^[0-9]+$/.test(r.id || '');
       }
+      // Pick the open menu that actually holds watchlist rows. Stray popups
+      // (tooltips, nested menus) can also match [class*="menuBox"], so we cannot
+      // simply take the last visible one — select the box containing list rows.
       var menu = null;
       var boxes = document.querySelectorAll('[class*="menuBox"]');
       for (var i = 0; i < boxes.length; i++) {
-        if (boxes[i].offsetParent !== null) { menu = boxes[i]; }
+        if (boxes[i].offsetParent === null) { continue; }
+        var probe = boxes[i].querySelectorAll('[role="row"]');
+        for (var p = 0; p < probe.length; p++) {
+          if (isListRow(probe[p])) { menu = boxes[i]; break; }
+        }
+        if (menu) { break; }
       }
-      if (!menu) { return { ok: false, reason: 'menu_not_open' }; }
+      if (!menu) { return { ok: false, reason: 'no_list_rows' }; }
       var rows = menu.querySelectorAll('[role="row"]');
       var available = [];
       var match = null;
@@ -139,6 +147,11 @@ export async function select({ name } = {}) {
     await closeWatchlistMenu();
     if (result?.reason === 'not_found') {
       return { success: false, error: "Watchlist '" + target + "' not found", available: result.available || [] };
+    }
+    if (result?.reason === 'no_list_rows') {
+      // The dropdown opened but exposed no selectable lists — likely a DOM
+      // change in TradingView, not a bad list name. Surface it distinctly.
+      return { success: false, error: 'Could not read the watchlist menu — no selectable lists found' };
     }
     return { success: false, error: 'Could not select watchlist (' + (result?.reason || 'unknown') + ')' };
   }
