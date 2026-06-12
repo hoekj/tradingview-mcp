@@ -279,15 +279,40 @@ export async function sort({ symbols }) {
 
   // Validated bijection. Clear then re-add in the requested order.
   // Use a longer settle delay after clear so the panel re-renders the add button.
-  await clear({});
+  const cleared = await clear({});
+  if (!cleared?.cleared) {
+    // A row could not be removed. Re-adding now would duplicate rows on top of a
+    // partially-cleared list, so bail before mutating further.
+    return {
+      success: false,
+      error: 'Could not clear the list before reordering: ' + (cleared?.error || 'unknown reason') + ' — list left as-is',
+      removed_count: cleared?.removed_count,
+    };
+  }
+
   await new Promise(r => setTimeout(r, 1000));
   for (const sym of resolved) {
     await add({ symbol: sym });
     await new Promise(r => setTimeout(r, 400));
   }
 
+  // Confirm the resulting order matches what was requested. If an add() silently
+  // resolved to the wrong instrument or dropped a symbol, report it rather than
+  // claiming success.
   const final = await get();
-  return { success: true, sorted: true, order: final.symbols.map(s => s.symbol) };
+  const finalOrder = final.symbols.map(s => s.symbol);
+  const matches = finalOrder.length === resolved.length
+    && finalOrder.every((sym, i) => normalizeSymbol(sym) === normalizeSymbol(resolved[i]));
+  if (!matches) {
+    return {
+      success: false,
+      error: 'Reorder did not produce the requested order — the list may be in an inconsistent state',
+      expected: resolved,
+      order: finalOrder,
+    };
+  }
+
+  return { success: true, sorted: true, order: finalOrder };
 }
 
 export async function add({ symbol }) {
