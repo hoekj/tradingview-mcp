@@ -75,6 +75,96 @@ export async function getActiveListName() {
   return name || null;
 }
 
+/**
+ * Activate a saved watchlist by name. TradingView exposes no API for this, so
+ * it is driven through the watchlists dropdown: the header button opens a menu
+ * whose list rows each carry an aria-selected attribute and a numeric id (the
+ * menu's action rows — Rename, Clear list, … — have neither), which is how a
+ * real list is told apart from a command. Matching is case-insensitive.
+ */
+export async function select({ name } = {}) {
+  if (name == null || String(name).trim() === '') {
+    return { success: false, error: 'name is required' };
+  }
+  const target = String(name).trim();
+
+  await ensureWatchlistOpen();
+
+  // Already active — avoid opening the menu and churning the UI.
+  const activeNow = await getActiveListName();
+  if (activeNow && activeNow.toLowerCase() === target.toLowerCase()) {
+    return { success: true, selected: activeNow, active_list: activeNow, note: 'already active' };
+  }
+
+  const opened = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="watchlists-button"]');
+      if (!btn) { return { ok: false }; }
+      btn.click();
+      return { ok: true };
+    })()
+  `);
+  if (!opened?.ok) {
+    return { success: false, error: 'Could not open the watchlist selector' };
+  }
+  await new Promise(r => setTimeout(r, 400));
+
+  const result = await evaluate(`
+    (function(name) {
+      function isListRow(r) {
+        return r.hasAttribute('aria-selected') && /^[0-9]+$/.test(r.id || '');
+      }
+      var menu = null;
+      var boxes = document.querySelectorAll('[class*="menuBox"]');
+      for (var i = 0; i < boxes.length; i++) {
+        if (boxes[i].offsetParent !== null) { menu = boxes[i]; }
+      }
+      if (!menu) { return { ok: false, reason: 'menu_not_open' }; }
+      var rows = menu.querySelectorAll('[role="row"]');
+      var available = [];
+      var match = null;
+      for (var j = 0; j < rows.length; j++) {
+        if (!isListRow(rows[j])) { continue; }
+        var label = (rows[j].getAttribute('aria-label') || rows[j].textContent).trim();
+        available.push(label);
+        if (label.toLowerCase() === name.toLowerCase()) { match = rows[j]; }
+      }
+      if (!match) { return { ok: false, reason: 'not_found', available: available }; }
+      match.click();
+      return { ok: true, matched: (match.getAttribute('aria-label') || match.textContent).trim() };
+    })(${safeString(target)})
+  `);
+
+  if (!result?.ok) {
+    await closeWatchlistMenu();
+    if (result?.reason === 'not_found') {
+      return { success: false, error: "Watchlist '" + target + "' not found", available: result.available || [] };
+    }
+    return { success: false, error: 'Could not select watchlist (' + (result?.reason || 'unknown') + ')' };
+  }
+
+  await new Promise(r => setTimeout(r, 400));
+  const active_list = await getActiveListName();
+  if (!active_list || active_list.toLowerCase() !== target.toLowerCase()) {
+    return { success: false, error: "Clicked '" + target + "' but the active list is '" + active_list + "'" };
+  }
+  return { success: true, selected: result.matched || target, active_list };
+}
+
+/**
+ * Dismiss the watchlists dropdown with Escape so a failed select leaves the UI
+ * as it was found.
+ */
+async function closeWatchlistMenu() {
+  try {
+    const c = await getClient();
+    await c.Input.dispatchKeyEvent({ type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    await c.Input.dispatchKeyEvent({ type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+    // Let the menu finish closing so a subsequent read of the header is stable.
+    await new Promise(r => setTimeout(r, 400));
+  } catch (_) {}
+}
+
 export async function get() {
   // Try internal API first — reads from the active watchlist widget
   const symbols = await evaluate(`

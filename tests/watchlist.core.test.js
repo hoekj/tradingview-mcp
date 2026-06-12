@@ -139,4 +139,40 @@ describe('watchlist core (live e2e)', () => {
       await sleep(300);
     }
   });
+
+  it('select() rejects an unknown list and reports available lists (non-destructive)', async () => {
+    const before = await watchlist.get();
+    const res = await watchlist.select({ name: '__definitely_not_a_real_list__' });
+    assert.equal(res.success, false, 'select refuses an unknown list');
+    assert.ok(Array.isArray(res.available) && res.available.length > 0, 'reports available lists');
+    const after = await watchlist.get();
+    assert.equal(after.active_list, before.active_list, 'active list unchanged after failed select');
+  });
+
+  it('select() is idempotent for the already-active list (non-destructive)', async () => {
+    const before = await watchlist.get();
+    const res = await watchlist.select({ name: before.active_list });
+    assert.equal(res.success, true, 'selecting the active list succeeds');
+    assert.equal(res.active_list, before.active_list, 'active list is unchanged');
+  });
+
+  it('select() switches to another existing list and restores', async () => {
+    const before = await watchlist.get();
+    // Discover the available lists via the rejection path, then pick a different one.
+    const probe = await watchlist.select({ name: '__definitely_not_a_real_list__' });
+    const other = (probe.available || []).find(n => n.toLowerCase() !== String(before.active_list).toLowerCase());
+    if (!other) {
+      return; // only one watchlist exists — nothing to switch to
+    }
+    try {
+      const res = await watchlist.select({ name: other });
+      assert.equal(res.success, true, `select switches to ${other}`);
+      assert.equal(res.active_list, other, 'active list reflects the new selection');
+      const after = await watchlist.get();
+      assert.equal(after.active_list, other, 'get() confirms the switch');
+    } finally {
+      await watchlist.select({ name: before.active_list });
+      await sleep(300);
+    }
+  });
 });

@@ -48,4 +48,11 @@ export function registerWatchlistTools(server) {
     try { return jsonResult(await core.sort({ symbols })); }
     catch (err) { await escapeRecover(); return jsonResult({ success: false, error: err.message }, true); }
   });
+
+  server.tool('watchlist_select', 'Activate a saved watchlist by name (e.g. "Today"). On failure the result lists the available watchlist names.', {
+    name: z.string().describe('Exact name of the saved watchlist to activate (case-insensitive)'),
+  }, async ({ name }) => {
+    try { return jsonResult(await core.select({ name })); }
+    catch (err) { await escapeRecover(); return jsonResult({ success: false, error: err.message }, true); }
+  });
 }

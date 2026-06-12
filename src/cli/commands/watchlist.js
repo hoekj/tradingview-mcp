@@ -2,7 +2,7 @@ import { register } from '../router.js';
 import * as core from '../../core/watchlist.js';
 
 register('watchlist', {
-  description: 'Watchlist tools (get, add, remove, clear, sort)',
+  description: 'Watchlist tools (get, add, remove, clear, sort, select)',
   subcommands: new Map([
     ['get', {
       description: 'Get watchlist symbols',
@@ -38,6 +38,16 @@ register('watchlist', {
           throw new Error('Symbols required. Usage: tv watchlist sort AAPL MSFT KO');
         }
         return core.sort({ symbols: positionals });
+      },
+    }],
+    ['select', {
+      description: 'Activate a saved watchlist by name',
+      handler: (opts, positionals) => {
+        if (!positionals[0]) {
+          throw new Error('List name required. Usage: tv watchlist select Today');
+        }
+        // Join positionals so multi-word names (e.g. "Magnificent 7") work unquoted.
+        return core.select({ name: positionals.join(' ') });
       },
     }],
   ]),
