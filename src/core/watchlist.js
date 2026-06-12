@@ -2,7 +2,7 @@
  * Core watchlist logic.
  * Uses TradingView's internal widget API with DOM fallback.
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js';
 
 /**
  * Normalize a symbol for matching. Compares case-insensitively and strips the
@@ -110,6 +110,41 @@ export async function get() {
     source: symbols?.source || 'unknown',
     symbols: symbols?.symbols || [],
   };
+}
+
+export async function remove({ symbol }) {
+  await ensureWatchlistOpen();
+
+  const result = await evaluate(`
+    (function(symbol) {
+      function norm(s) {
+        var u = String(s).toUpperCase().trim();
+        var c = u.indexOf(':');
+        return c >= 0 ? u.slice(c + 1) : u;
+      }
+      var target = norm(symbol);
+      var els = document.querySelectorAll('[data-symbol-full]');
+      for (var i = 0; i < els.length; i++) {
+        var full = els[i].getAttribute('data-symbol-full');
+        if (norm(full) === target || String(full).toUpperCase() === String(symbol).toUpperCase()) {
+          var row = els[i].closest('[class*="symbol-"]') || els[i].closest('[class*="row"]') || els[i].parentElement;
+          var btn = row ? row.querySelector('[class*="removeButton"]') : null;
+          if (!btn) { return { found: true, removed: false, reason: 'remove_button_not_found' }; }
+          btn.click();
+          return { found: true, removed: true, matched: full };
+        }
+      }
+      return { found: false };
+    })(${safeString(symbol)})
+  `);
+
+  if (!result?.found) {
+    return { success: true, removed: false, symbol, note: symbol + ' not in active list' };
+  }
+  if (!result.removed) {
+    throw new Error('Found ' + symbol + ' but its remove button was not found');
+  }
+  return { success: true, removed: true, symbol, matched: result.matched };
 }
 
 export async function add({ symbol }) {
