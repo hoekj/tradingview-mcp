@@ -40,8 +40,17 @@ export async function ensureWatchlistOpen() {
       var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
         || document.querySelector('[aria-label*="Watchlist"]');
       if (!btn) return { error: 'Watchlist button not found' };
-      var mounted = document.querySelectorAll('[data-symbol-full]').length > 0;
-      if (!mounted) { btn.click(); return { opened: true }; }
+      // Check whether the watchlist panel is already rendered and visible.
+      // Check for the add-symbol button or a watchlist-specific container being
+      // present and visible — this works even when the list is empty (no rows).
+      var addBtn = document.querySelector('[data-name="add-symbol-button"]')
+        || document.querySelector('[aria-label="Add symbol"]');
+      var panel = document.querySelector('[data-name="watchlist-widget"]')
+        || document.querySelector('[class*="watchlistWrapper"]')
+        || document.querySelector('[class*="watchlist-widget"]');
+      var panelVisible = (addBtn && addBtn.offsetParent !== null)
+        || (panel && panel.offsetParent !== null);
+      if (!panelVisible) { btn.click(); return { opened: true }; }
       return { opened: false };
     })()
   `);
@@ -205,6 +214,64 @@ export async function clear({ expect_list } = {}) {
   }
 
   return { success: true, cleared: true, removed_count: removedCount, list: activeList };
+}
+
+/**
+ * Reorder the active watchlist to match the supplied symbol order.
+ * The input must be an exact permutation of the current list — no extras,
+ * no omissions, no duplicates. On any mismatch the call is rejected and the
+ * list is left untouched.
+ *
+ * Reorder is implemented as clear + sequential re-add because TradingView
+ * does not expose a drag-to-reorder API via CDP.
+ */
+export async function sort({ symbols }) {
+  if (!Array.isArray(symbols) || symbols.length === 0) {
+    return { success: false, error: 'symbols must be a non-empty array' };
+  }
+
+  await ensureWatchlistOpen();
+
+  const current = await get();
+  const currentNorm = current.symbols.map(s => normalizeSymbol(s.symbol));
+  const inputNorm = symbols.map(s => normalizeSymbol(s));
+
+  // Reject duplicates in the input — a permutation has no repeats.
+  const seen = new Set();
+  const dupes = [];
+  for (const s of inputNorm) {
+    if (seen.has(s)) {
+      dupes.push(s);
+    }
+    seen.add(s);
+  }
+
+  const currentSet = new Set(currentNorm);
+  const inputSet = new Set(inputNorm);
+  const missing = currentNorm.filter(s => !inputSet.has(s));
+  const extra = inputNorm.filter(s => !currentSet.has(s));
+
+  if (dupes.length > 0 || missing.length > 0 || extra.length > 0) {
+    return {
+      success: false,
+      error: 'symbols must be an exact permutation of the active list',
+      missing,
+      extra,
+      duplicates: dupes,
+    };
+  }
+
+  // Validated: same set, no dupes. Clear then re-add in the requested order.
+  // Use a longer settle delay after clear so the panel re-renders the add button.
+  await clear({});
+  await new Promise(r => setTimeout(r, 1000));
+  for (const sym of symbols) {
+    await add({ symbol: sym });
+    await new Promise(r => setTimeout(r, 400));
+  }
+
+  const final = await get();
+  return { success: true, sorted: true, order: final.symbols.map(s => s.symbol) };
 }
 
 export async function add({ symbol }) {

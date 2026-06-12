@@ -83,4 +83,35 @@ describe('watchlist core (live e2e)', () => {
       }
     }
   });
+
+  it('sort() rejects a non-permutation (extra symbol, non-destructive)', async () => {
+    const before = await watchlist.get();
+    const input = before.symbols.map(s => s.symbol).concat('ZZZZ_FAKE');
+    const res = await watchlist.sort({ symbols: input });
+    assert.equal(res.success, false, 'sort refuses non-permutation');
+    assert.ok(res.extra && res.extra.length > 0, 'reports extra symbols');
+    const after = await watchlist.get();
+    assert.equal(after.count, before.count, 'list unchanged after refused sort');
+  });
+
+  it('sort() reorders an exact permutation and restores order', async () => {
+    const before = await watchlist.get();
+    const original = before.symbols.map(s => s.symbol);
+    if (original.length < 2) {
+      return; // need at least two symbols to observe a reorder
+    }
+    const reversed = [...original].reverse();
+    try {
+      const res = await watchlist.sort({ symbols: reversed });
+      assert.equal(res.success, true, 'sort succeeds for a permutation');
+      await sleep(300);
+      const after = await watchlist.get();
+      const got = after.symbols.map(s => watchlist.normalizeSymbol(s.symbol));
+      const want = reversed.map(s => watchlist.normalizeSymbol(s));
+      assert.deepEqual(got, want, 'order matches the requested permutation');
+    } finally {
+      await watchlist.sort({ symbols: original });
+      await sleep(300);
+    }
+  });
 });
