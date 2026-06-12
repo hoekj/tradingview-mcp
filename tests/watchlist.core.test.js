@@ -106,9 +106,34 @@ describe('watchlist core (live e2e)', () => {
       assert.equal(res.success, true, 'sort succeeds for a permutation');
       await sleep(300);
       const after = await watchlist.get();
-      const got = after.symbols.map(s => watchlist.normalizeSymbol(s.symbol));
-      const want = reversed.map(s => watchlist.normalizeSymbol(s));
-      assert.deepEqual(got, want, 'order matches the requested permutation');
+      const got = after.symbols.map(s => s.symbol);
+      // Compare FULL "EXCHANGE:SYMBOL" strings, not stripped — a weaker
+      // normalized comparison would miss an instrument swap across exchanges.
+      assert.deepEqual(got, reversed, 'full-symbol order matches the requested permutation');
+    } finally {
+      await watchlist.sort({ symbols: original });
+      await sleep(300);
+    }
+  });
+
+  it('sort() accepts bare tickers but preserves the full exchange-qualified symbol', async () => {
+    const before = await watchlist.get();
+    const original = before.symbols.map(s => s.symbol);
+    // Only meaningful when rows carry an exchange prefix to preserve.
+    const exchangeQualified = original.filter(s => s.includes(':'));
+    if (original.length < 2 || exchangeQualified.length === 0) {
+      return;
+    }
+    const bareReversed = [...original].reverse().map(s => watchlist.normalizeSymbol(s));
+    const fullReversed = [...original].reverse();
+    try {
+      const res = await watchlist.sort({ symbols: bareReversed });
+      assert.equal(res.success, true, 'sort succeeds for bare-ticker permutation');
+      await sleep(300);
+      const after = await watchlist.get();
+      const got = after.symbols.map(s => s.symbol);
+      // The stored list must keep the original full symbols, not the bare input.
+      assert.deepEqual(got, fullReversed, 'bare input re-added the full exchange-qualified symbols');
     } finally {
       await watchlist.sort({ symbols: original });
       await sleep(300);

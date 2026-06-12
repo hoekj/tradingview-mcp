@@ -233,39 +233,55 @@ export async function sort({ symbols }) {
   await ensureWatchlistOpen();
 
   const current = await get();
-  const currentNorm = current.symbols.map(s => normalizeSymbol(s.symbol));
-  const inputNorm = symbols.map(s => normalizeSymbol(s));
 
-  // Reject duplicates in the input — a permutation has no repeats.
-  const seen = new Set();
-  const dupes = [];
-  for (const s of inputNorm) {
-    if (seen.has(s)) {
-      dupes.push(s);
+  // Match each requested symbol to exactly one current row. Identity is the
+  // FULL "EXCHANGE:SYMBOL" string, so two rows that share a ticker on different
+  // exchanges (e.g. BINANCE:BTCUSD and COINBASE:BTCUSD) stay distinct. An exact
+  // full-symbol match wins; a bare ticker falls back to an exchange-stripped
+  // match so callers may pass "AAPL" for a "NASDAQ:AAPL" row.
+  const rows = current.symbols.map((s) => ({ full: s.symbol, norm: normalizeSymbol(s.symbol), used: false }));
+  const resolved = [];
+  const extra = [];
+  const ambiguous = [];
+
+  for (const input of symbols) {
+    const inputUpper = String(input).toUpperCase().trim();
+    const inputNorm = normalizeSymbol(input);
+    let candidates = rows.filter((r) => !r.used && r.full.toUpperCase() === inputUpper);
+    if (candidates.length === 0) {
+      candidates = rows.filter((r) => !r.used && r.norm === inputNorm);
     }
-    seen.add(s);
+    if (candidates.length === 0) {
+      extra.push(input);
+      continue;
+    }
+    if (candidates.length > 1) {
+      ambiguous.push(input);
+      continue;
+    }
+    candidates[0].used = true;
+    // Re-add the matched row's full symbol, never the raw input, so a bare
+    // ticker can never resolve to a different instrument than the one removed.
+    resolved.push(candidates[0].full);
   }
 
-  const currentSet = new Set(currentNorm);
-  const inputSet = new Set(inputNorm);
-  const missing = currentNorm.filter(s => !inputSet.has(s));
-  const extra = inputNorm.filter(s => !currentSet.has(s));
+  const missing = rows.filter((r) => !r.used).map((r) => r.full);
 
-  if (dupes.length > 0 || missing.length > 0 || extra.length > 0) {
+  if (extra.length > 0 || ambiguous.length > 0 || missing.length > 0) {
     return {
       success: false,
       error: 'symbols must be an exact permutation of the active list',
       missing,
       extra,
-      duplicates: dupes,
+      ambiguous,
     };
   }
 
-  // Validated: same set, no dupes. Clear then re-add in the requested order.
+  // Validated bijection. Clear then re-add in the requested order.
   // Use a longer settle delay after clear so the panel re-renders the add button.
   await clear({});
   await new Promise(r => setTimeout(r, 1000));
-  for (const sym of symbols) {
+  for (const sym of resolved) {
     await add({ symbol: sym });
     await new Promise(r => setTimeout(r, 400));
   }
