@@ -4,6 +4,53 @@
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
 
+/**
+ * Normalize a symbol for matching. Compares case-insensitively and strips the
+ * exchange prefix so a caller's "AAPL" matches a row's "NASDAQ:AAPL".
+ */
+export function normalizeSymbol(s) {
+  const upper = String(s).toUpperCase().trim();
+  const colon = upper.indexOf(':');
+  return colon >= 0 ? upper.slice(colon + 1) : upper;
+}
+
+/**
+ * Activate the watchlist tab in the right panel if it is not already showing.
+ * Other widgets (alerts, object tree) can occupy the same panel, so the
+ * watchlist must be mounted before reading or mutating rows.
+ */
+export async function ensureWatchlistOpen() {
+  const state = await evaluate(`
+    (function() {
+      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
+        || document.querySelector('[aria-label*="Watchlist"]');
+      if (!btn) return { error: 'Watchlist button not found' };
+      var mounted = document.querySelectorAll('[data-symbol-full]').length > 0;
+      if (!mounted) { btn.click(); return { opened: true }; }
+      return { opened: false };
+    })()
+  `);
+  if (state?.error) {
+    throw new Error(state.error);
+  }
+  if (state?.opened) {
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+/**
+ * Read the name of the currently active watchlist (e.g. "Today").
+ */
+export async function getActiveListName() {
+  const name = await evaluate(`
+    (function() {
+      var el = document.querySelector('[data-name="watchlists-button"]');
+      return el ? el.textContent.trim() : null;
+    })()
+  `);
+  return name || null;
+}
+
 export async function get() {
   // Try internal API first — reads from the active watchlist widget
   const symbols = await evaluate(`
@@ -54,8 +101,11 @@ export async function get() {
     })()
   `);
 
+  const active_list = await getActiveListName();
+
   return {
     success: true,
+    active_list,
     count: symbols?.symbols?.length || 0,
     source: symbols?.source || 'unknown',
     symbols: symbols?.symbols || [],
@@ -66,22 +116,7 @@ export async function add({ symbol }) {
   // Use keyboard shortcut to open symbol search in watchlist, type symbol, press Enter
   const c = await getClient();
 
-  // First ensure watchlist panel is open
-  const panelState = await evaluate(`
-    (function() {
-      var btn = document.querySelector('[data-name="base-watchlist-widget-button"]')
-        || document.querySelector('[aria-label*="Watchlist"]');
-      if (!btn) return { error: 'Watchlist button not found' };
-      var isActive = btn.getAttribute('aria-pressed') === 'true'
-        || btn.classList.toString().indexOf('Active') !== -1
-        || btn.classList.toString().indexOf('active') !== -1;
-      if (!isActive) { btn.click(); return { opened: true }; }
-      return { opened: false };
-    })()
-  `);
-
-  if (panelState?.error) throw new Error(panelState.error);
-  if (panelState?.opened) await new Promise(r => setTimeout(r, 500));
+  await ensureWatchlistOpen();
 
   // Click the "Add symbol" button (various selectors)
   const addClicked = await evaluate(`

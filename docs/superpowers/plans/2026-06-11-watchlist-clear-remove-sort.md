@@ -39,9 +39,10 @@
 Create `tests/watchlist.core.test.js`:
 
 ```js
-import { describe, it, before } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import * as watchlist from '../src/core/watchlist.js';
+import { disconnect } from '../src/connection.js';
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -50,6 +51,11 @@ describe('watchlist core (live e2e)', () => {
     // Ensure the watchlist tab is active before the suite runs.
     await watchlist.get();
     await sleep(300);
+  });
+
+  // Close the shared CDP websocket so `node --test` can exit instead of hanging.
+  after(async () => {
+    await disconnect();
   });
 
   it('get() returns active_list name', async () => {
@@ -63,7 +69,7 @@ describe('watchlist core (live e2e)', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: FAIL — `active_list is a string` (current `get()` does not return `active_list`).
 
 - [ ] **Step 3: Implement helpers and enrich `get()`**
@@ -141,7 +147,7 @@ Also refactor `add()` to reuse the new helper. Replace the inline panel-open blo
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: PASS (2 assertions in the `get()` test).
 
 - [ ] **Step 5: Commit**
@@ -195,7 +201,7 @@ Append to `tests/watchlist.core.test.js`, inside the `describe` block:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: FAIL — `watchlist.remove is not a function`.
 
 - [ ] **Step 3: Implement `remove()`**
@@ -247,7 +253,7 @@ import { evaluate, evaluateAsync, getClient, safeString } from '../connection.js
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: PASS (idempotent test + round-trip test).
 
 - [ ] **Step 5: Commit**
@@ -305,7 +311,7 @@ Append to `tests/watchlist.core.test.js`, inside the `describe` block:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: FAIL — `watchlist.clear is not a function`. (The destructive test is skipped by default.)
 
 - [ ] **Step 3: Implement `clear()`**
@@ -351,7 +357,7 @@ export async function clear({ expect_list } = {}) {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: PASS — refusal test passes; destructive test is skipped (printed as skipped).
 
 - [ ] **Step 5: Commit**
@@ -408,7 +414,7 @@ Append to `tests/watchlist.core.test.js`, inside the `describe` block:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: FAIL — `watchlist.sort is not a function`.
 
 - [ ] **Step 3: Implement `sort()`**
@@ -467,7 +473,7 @@ export async function sort({ symbols }) {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: PASS — rejection test and reorder/restore test both pass.
 
 - [ ] **Step 5: Commit**
@@ -650,12 +656,12 @@ git commit -m "docs(watchlist): document remove/clear/sort and bump tool counts"
 
 - [ ] **Run the full new test file:**
 
-Run: `node --test tests/watchlist.core.test.js`
+Run: `node --test --test-force-exit tests/watchlist.core.test.js`
 Expected: all tests pass; the destructive `clear()` empties-the-list test shows as skipped (unless `WATCHLIST_DESTRUCTIVE_TESTS=1`).
 
 - [ ] **Optionally run the destructive clear test once, manually:**
 
-Run: `$env:WATCHLIST_DESTRUCTIVE_TESTS=1; node --test tests/watchlist.core.test.js` (PowerShell)
+Run: `$env:WATCHLIST_DESTRUCTIVE_TESTS=1; node --test --test-force-exit tests/watchlist.core.test.js` (PowerShell)
 Expected: passes; the active list is emptied then restored to its original membership.
 
 ---
