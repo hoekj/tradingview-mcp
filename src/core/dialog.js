@@ -54,7 +54,9 @@ export async function pollForDialog(d, { maxMs = 2400, interval = 300 } = {}) {
     if (result?.handled) {
       return { handled: true, action: result.action, button_text: result.button_text, elapsed_ms: Date.now() - start };
     }
-    await d.sleep(interval);
+    if (i < maxTicks - 1) {
+      await d.sleep(interval);
+    }
   }
   return { handled: false, action: null, button_text: null, elapsed_ms: Date.now() - start };
 }
