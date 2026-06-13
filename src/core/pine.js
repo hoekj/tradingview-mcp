@@ -4,6 +4,7 @@
  * They throw on error (callers catch and format).
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
+import { pollForDialog } from './dialog.js';
 
 function _resolve(deps) {
   return {
@@ -750,28 +751,8 @@ export async function newScript({ type = 'indicator', name, _deps } = {}) {
 
   // TradingView may ask about unsaved changes in the previous buffer.
   // Never click "Save" here — that would write into the previous slot.
-  // The confirm dialog is position:fixed (offsetParent === null), so match a
-  // visible "Don't save"/"Discard" button directly rather than scanning
-  // dialog containers. Never click "Save" — that writes the previous slot.
-  const dialog = await d.evaluate(`
-    (function __dismissUnsavedChangesDialog() {
-      var btns = document.querySelectorAll('button');
-      var sawSave = false;
-      for (var i = 0; i < btns.length; i++) {
-        var btn = btns[i];
-        if (!btn.getClientRects().length) continue;
-        var t = (btn.textContent || '').trim();
-        if (/don.?t save|discard changes|^discard$/i.test(t)) {
-          btn.click();
-          return { found: true, action: t };
-        }
-        if (/^save( changes)?$/i.test(t)) sawSave = true;
-      }
-      // A lone Save button with no discard option means an unexpected dialog.
-      return { found: false, ambiguous: sawSave };
-    })()
-  `);
-  if (dialog?.found) await d.sleep(400);
+  const dialog = await pollForDialog(d);
+  if (dialog.handled) await d.sleep(400);
 
   // Save the fresh buffer so TradingView allocates a new script slot.
   // Ctrl+S is focus-dependent (chart focus saves the layout instead), so

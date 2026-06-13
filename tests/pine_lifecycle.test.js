@@ -29,10 +29,11 @@ function makeDeps({
   titleMenu = { clicked: true, label: 'Script A' },
   createNewItem = { clicked: true },
   newMenuItem = { clicked: true, label: 'Indicator' },
-  unsavedDialog = { found: false },
+  dialogResult = { handled: false },
   saveNameDialog = { handled: true },
   compileButton = 'Pine Save',
   editorSaveButton = { clicked: true },
+  openScriptResult = { success: true, name: 'Script A', id: 'USER;aaa', lines: 10 },
 } = {}) {
   const calls = [];
   let listIdx = 0;
@@ -46,7 +47,8 @@ function makeDeps({
     if (expr.includes('__openScriptTitleMenu')) { return titleMenu; }
     if (expr.includes('__clickCreateNewMenuItem')) { return createNewItem; }
     if (expr.includes('__clickNewScriptMenuItem')) { return newMenuItem; }
-    if (expr.includes('__dismissUnsavedChangesDialog')) { return unsavedDialog; }
+    if (expr.includes('__dismissDialog')) { return dialogResult; }
+    if (expr.includes('pine-facade/list') && expr.includes('setValue')) { return openScriptResult; }
     if (expr.includes('__clickEditorSaveButton')) { return editorSaveButton; }
     if (expr.includes('__handleSaveNameDialog')) { return saveNameDialog; }
     if (expr.includes('__clickCompileButton')) { return compileButton; }
@@ -188,12 +190,19 @@ describe('newScript() — must create a real script slot', () => {
   it('dismisses an unsaved-changes prompt without saving the old buffer', async () => {
     const m = makeDeps({
       lists: [[SCRIPT_A], [SCRIPT_A, SCRIPT_NEW]],
-      unsavedDialog: { found: true, action: 'discarded' },
+      dialogResult: { handled: true, action: 'discard', button_text: "Don't save" },
     });
     const result = await newScript({ type: 'indicator', _deps: m._deps });
     assert.equal(result.success, true);
-    const dismissCall = m.calls.find(c => c.includes('__dismissUnsavedChangesDialog'));
-    assert.ok(dismissCall, 'expected an unsaved-changes dialog check');
+    const dismissCall = m.calls.find(c => c.includes('__dismissDialog'));
+    assert.ok(dismissCall, 'expected pollForDialog call for pending-changes dialog');
+  });
+
+  it('calls pollForDialog after menu navigation (not a one-shot check)', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A], [SCRIPT_A, SCRIPT_NEW]] });
+    await newScript({ type: 'indicator', _deps: m._deps });
+    const dialogCalls = m.calls.filter(c => c.includes('__dismissDialog'));
+    assert.ok(dialogCalls.length > 0, 'expected at least one pollForDialog evaluate call');
   });
 });
 
