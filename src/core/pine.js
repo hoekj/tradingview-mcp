@@ -817,65 +817,129 @@ export async function newScript({ type = 'indicator', name, _deps } = {}) {
 }
 
 export async function openScript({ name, _deps }) {
-  const { evaluate, evaluateAsync, sleep } = _resolve(_deps);
+  const d = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen(_deps);
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const escapedName = JSON.stringify(name.toLowerCase());
+  // Resolve the target script from the saved-script list before touching the UI.
+  const { scripts, error } = await fetchScriptList(d.evaluateAsync);
+  if (!scripts) throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
 
-  const result = await evaluateAsync(`
-    (function() {
-      var target = ${escapedName};
-      return fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
-        .then(function(r) { return r.json(); })
-        .then(function(scripts) {
-          if (!Array.isArray(scripts)) return {error: 'pine-facade returned unexpected data'};
-          var match = null;
-          for (var i = 0; i < scripts.length; i++) {
-            var sn = (scripts[i].scriptName || '').toLowerCase();
-            var st = (scripts[i].scriptTitle || '').toLowerCase();
-            if (sn === target || st === target) { match = scripts[i]; break; }
-          }
-          if (!match) {
-            for (var j = 0; j < scripts.length; j++) {
-              var sn2 = (scripts[j].scriptName || '').toLowerCase();
-              var st2 = (scripts[j].scriptTitle || '').toLowerCase();
-              if (sn2.indexOf(target) !== -1 || st2.indexOf(target) !== -1) { match = scripts[j]; break; }
-            }
-          }
-          if (!match) return {error: 'Script "' + target + '" not found. Use pine_list_scripts to see available scripts.'};
-
-          var id = match.scriptIdPart;
-          var ver = match.version || 1;
-          return fetch('https://pine-facade.tradingview.com/pine-facade/get/' + id + '/' + ver, { credentials: 'include' })
-            .then(function(r2) { return r2.json(); })
-            .then(function(data) {
-              var source = data.source || '';
-              if (!source) return {error: 'Script source is empty', name: match.scriptName || match.scriptTitle};
-              var m = ${FIND_MONACO};
-              if (m) {
-                m.editor.setValue(source);
-                return {success: true, name: match.scriptName || match.scriptTitle, id: id, lines: source.split('\\n').length};
-              }
-              return {error: 'Monaco editor not found to inject source', name: match.scriptName || match.scriptTitle};
-            });
-        })
-        .catch(function(e) { return {error: e.message}; });
-    })()
-  `);
-
-  if (result?.error) {
-    throw new Error(result.error);
+  const target = name.toLowerCase();
+  let match = scripts.find(s =>
+    s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target
+  );
+  if (!match) {
+    match = scripts.find(s =>
+      s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target)
+    );
+  }
+  if (!match) {
+    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
   }
 
-  await pollForDialog({ evaluate, sleep });
+  const scriptId = match.id;
+  const scriptName = match.name;
 
-  // Note: this loads the script's source into the open buffer; TradingView
-  // still considers the previously open slot active. The tracker lets the
-  // save paths warn when a save lands in a different slot than expected.
-  _trackedOpenScript = { id: result.id, name: result.name };
+  // Click the script title button to open the menu.
+  const menu = await d.evaluate(`
+    (function __openScriptTitleMenu() {
+      var btn = document.querySelector('[class*="nameButton"][aria-haspopup]');
+      if (!btn || btn.offsetParent === null) return { clicked: false };
+      var label = (btn.textContent || '').trim();
+      if (btn.getAttribute('aria-expanded') === 'true') {
+        return { clicked: true, label: label, already_open: true };
+      }
+      btn.click();
+      return { clicked: true, label: label };
+    })()
+  `);
+  if (!menu?.clicked) {
+    throw new Error('Could not find the Pine editor script title menu button.');
+  }
+  await d.sleep(400);
 
-  return { success: true, name: result.name, script_id: result.id, lines: result.lines, source: 'internal_api', opened: true };
+  // Click "Open script…" in the dropdown.
+  const openItem = await d.evaluate(`
+    (function __clickOpenScriptMenuItem() {
+      var els = document.querySelectorAll('[role="menuitem"]');
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (el.offsetParent === null) continue;
+        if (/open script/i.test((el.textContent || '').trim())) {
+          el.click();
+          return { clicked: true };
+        }
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { clicked: false };
+    })()
+  `);
+  if (!openItem?.clicked) {
+    throw new Error('Could not find the "Open script…" item in the Pine editor script menu.');
+  }
+  await d.sleep(500);
+
+  // Type the resolved script name into the search box of the Open Script dialog.
+  const searched = await d.evaluate(`
+    (function __typeInScriptSearch() {
+      var input = null;
+      var candidates = document.querySelectorAll('input');
+      for (var i = 0; i < candidates.length; i++) {
+        if (candidates[i].placeholder === 'Search' && candidates[i].offsetParent !== null) {
+          input = candidates[i];
+          break;
+        }
+      }
+      if (!input) {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        return { found: false };
+      }
+      input.focus();
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(scriptName)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return { found: true };
+    })()
+  `);
+  if (!searched?.found) {
+    throw new Error('Could not find the search input in the Open Script dialog.');
+  }
+  await d.sleep(400);
+
+  // Click the matching script in the filtered list.
+  const listClick = await d.evaluate(`
+    (function __clickScriptListItem() {
+      var targetName = ${JSON.stringify(scriptName.toLowerCase())};
+      var items = document.querySelectorAll('[class*="itemRow-"]');
+      for (var i = 0; i < items.length; i++) {
+        var item = items[i];
+        if (item.offsetParent === null) continue;
+        var titleEl = item.querySelector('[class*="titleText-"]');
+        if (titleEl && titleEl.textContent.trim().toLowerCase() === targetName) {
+          item.click();
+          return { clicked: true, name: titleEl.textContent.trim() };
+        }
+      }
+      var visible = Array.from(items).filter(function(el) { return el.offsetParent !== null; });
+      if (visible.length === 1) {
+        var t = visible[0].querySelector('[class*="titleText-"]');
+        visible[0].click();
+        return { clicked: true, name: t ? t.textContent.trim() : '' };
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { clicked: false };
+    })()
+  `);
+  if (!listClick?.clicked) {
+    throw new Error(`Could not select "${scriptName}" in the Open Script dialog. Try a more specific name.`);
+  }
+  await d.sleep(400);
+
+  await pollForDialog(d);
+
+  _trackedOpenScript = { id: scriptId, name: scriptName };
+  return { success: true, name: scriptName, script_id: scriptId, opened: true };
 }
 
 export async function listScripts({ _deps } = {}) {

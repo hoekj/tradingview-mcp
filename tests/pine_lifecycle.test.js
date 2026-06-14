@@ -33,19 +33,23 @@ function makeDeps({
   saveNameDialog = { handled: true },
   compileButton = 'Pine Save',
   editorSaveButton = { clicked: true },
-  openScriptResult = { success: true, name: 'Script A', id: 'USER;aaa', lines: 10 },
+  openScriptMenuItem = { clicked: true },
+  scriptSearch = { found: true },
+  scriptListClick = { clicked: true, name: 'Script A' },
 } = {}) {
   const calls = [];
   let listIdx = 0;
   const handler = async (expr) => {
     calls.push(expr);
-    if (expr.includes('pine-facade/list') && expr.includes('setValue')) { return openScriptResult; }
     if (expr.includes('pine-facade/list')) {
       const list = lists[Math.min(listIdx, lists.length - 1)];
       listIdx++;
       return { scripts: list };
     }
     if (expr.includes('__openScriptTitleMenu')) { return titleMenu; }
+    if (expr.includes('__clickOpenScriptMenuItem')) { return openScriptMenuItem; }
+    if (expr.includes('__typeInScriptSearch')) { return scriptSearch; }
+    if (expr.includes('__clickScriptListItem')) { return scriptListClick; }
     if (expr.includes('__clickCreateNewMenuItem')) { return createNewItem; }
     if (expr.includes('__clickNewScriptMenuItem')) { return newMenuItem; }
     if (expr.includes('__dismissDialog')) { return dialogResult; }
@@ -290,35 +294,37 @@ describe('getSource() — identifies the open script', () => {
 
 // ── openScript() ─────────────────────────────────────────────────────────
 
-describe('openScript() — tracks what the caller believes is open', () => {
-  it('records the opened script for later mismatch detection', async () => {
-    const handler = async (expr) => {
-      if (expr.includes('pine-facade/list')) {
-        return { success: true, name: 'Script A', id: 'USER;aaa', lines: 3 };
-      }
-      if (expr.includes('findMonacoEditor')) { return true; }
-      return undefined;
-    };
-    const _deps = { evaluate: handler, evaluateAsync: handler, sleep: async () => {} };
-    await openScript({ name: 'Script A', _deps });
+describe('openScript() — navigates the Open Script UI to switch the active slot', () => {
+  it('sets the tracked open script for later mismatch detection', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await openScript({ name: 'Script A', _deps: m._deps });
     assert.equal(getTrackedOpenScript().id, 'USER;aaa');
+    assert.equal(getTrackedOpenScript().name, 'Script A');
   });
 
-  it('polls for dialogs after injecting source into Monaco', async () => {
-    const calls = [];
-    const handler = async (expr) => {
-      calls.push(expr);
-      if (expr.includes('pine-facade/list')) {
-        return { success: true, name: 'Script A', id: 'USER;aaa', lines: 3 };
-      }
-      if (expr.includes('findMonacoEditor')) { return true; }
-      return undefined;
-    };
-    const _deps = { evaluate: handler, evaluateAsync: handler, sleep: async () => {} };
-    await openScript({ name: 'Script A', _deps });
+  it('drives the full title-menu → Open → search → click flow', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await openScript({ name: 'Script A', _deps: m._deps });
+    assert.ok(m.calls.some(c => c.includes('__openScriptTitleMenu')), 'expected title menu click');
+    assert.ok(m.calls.some(c => c.includes('__clickOpenScriptMenuItem')), 'expected Open Script menu item click');
+    assert.ok(m.calls.some(c => c.includes('__typeInScriptSearch')), 'expected script name typed in search');
+    assert.ok(m.calls.some(c => c.includes('__clickScriptListItem')), 'expected script list item click');
+  });
+
+  it('polls for dialogs after clicking the script list item', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await openScript({ name: 'Script A', _deps: m._deps });
     assert.ok(
-      calls.some(c => c.includes('__dismissDialog')),
-      'expected pollForDialog evaluate call after setValue'
+      m.calls.some(c => c.includes('__dismissDialog')),
+      'expected pollForDialog evaluate call after list item click'
+    );
+  });
+
+  it('throws when the script name is not found', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await assert.rejects(
+      openScript({ name: 'Nonexistent Script', _deps: m._deps }),
+      /not found/i
     );
   });
 });
