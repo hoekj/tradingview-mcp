@@ -39,6 +39,7 @@ function makeDeps({
   let listIdx = 0;
   const handler = async (expr) => {
     calls.push(expr);
+    if (expr.includes('pine-facade/list') && expr.includes('setValue')) { return openScriptResult; }
     if (expr.includes('pine-facade/list')) {
       const list = lists[Math.min(listIdx, lists.length - 1)];
       listIdx++;
@@ -48,7 +49,6 @@ function makeDeps({
     if (expr.includes('__clickCreateNewMenuItem')) { return createNewItem; }
     if (expr.includes('__clickNewScriptMenuItem')) { return newMenuItem; }
     if (expr.includes('__dismissDialog')) { return dialogResult; }
-    if (expr.includes('pine-facade/list') && expr.includes('setValue')) { return openScriptResult; }
     if (expr.includes('__clickEditorSaveButton')) { return editorSaveButton; }
     if (expr.includes('__handleSaveNameDialog')) { return saveNameDialog; }
     if (expr.includes('__clickCompileButton')) { return compileButton; }
