@@ -891,10 +891,7 @@ export async function openScript({ name, _deps }) {
           break;
         }
       }
-      if (!input) {
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-        return { found: false };
-      }
+      if (!input) { return { found: false }; }
       input.focus();
       var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
       setter.call(input, ${JSON.stringify(scriptName)});
@@ -903,36 +900,46 @@ export async function openScript({ name, _deps }) {
     })()
   `);
   if (!searched?.found) {
+    // Dialog is open but search input not found — leave dialog open so user can see state.
     throw new Error('Could not find the search input in the Open Script dialog.');
   }
   await d.sleep(400);
 
   // Click the matching script in the filtered list.
+  // The onClick lives on the inner itemInfo element, not the itemRow container.
+  // If there is no unique exact match, leave the dialog open so the user can
+  // see the filtered results and select manually.
   const listClick = await d.evaluate(`
     (function __clickScriptListItem() {
       var targetName = ${JSON.stringify(scriptName.toLowerCase())};
-      var items = document.querySelectorAll('[class*="itemRow-"]');
+      var items = Array.from(document.querySelectorAll('[class*="itemRow-"]')).filter(function(el) {
+        return el.offsetParent !== null;
+      });
+      // Prefer an exact title match.
       for (var i = 0; i < items.length; i++) {
-        var item = items[i];
-        if (item.offsetParent === null) continue;
-        var titleEl = item.querySelector('[class*="titleText-"]');
+        var titleEl = items[i].querySelector('[class*="titleText-"]');
         if (titleEl && titleEl.textContent.trim().toLowerCase() === targetName) {
-          item.click();
+          var infoEl = items[i].querySelector('[class*="itemInfo-"]');
+          (infoEl || items[i]).click();
           return { clicked: true, name: titleEl.textContent.trim() };
         }
       }
-      var visible = Array.from(items).filter(function(el) { return el.offsetParent !== null; });
-      if (visible.length === 1) {
-        var t = visible[0].querySelector('[class*="titleText-"]');
-        visible[0].click();
+      // Fallback: only safe to click when exactly one item remains after filtering.
+      if (items.length === 1) {
+        var t = items[0].querySelector('[class*="titleText-"]');
+        var inf = items[0].querySelector('[class*="itemInfo-"]');
+        (inf || items[0]).click();
         return { clicked: true, name: t ? t.textContent.trim() : '' };
       }
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-      return { clicked: false };
+      // Ambiguous or not found — leave dialog open.
+      return { clicked: false, visible: items.length };
     })()
   `);
   if (!listClick?.clicked) {
-    throw new Error(`Could not select "${scriptName}" in the Open Script dialog. Try a more specific name.`);
+    const hint = listClick?.visible > 1
+      ? `${listClick.visible} scripts match "${scriptName}" — use a more specific name.`
+      : `"${scriptName}" not found in the Open Script dialog.`;
+    throw new Error(hint);
   }
   await d.sleep(400);
 
