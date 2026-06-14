@@ -2,6 +2,7 @@
  * Core UI automation logic.
  */
 import { evaluate, evaluateAsync, getClient } from '../connection.js';
+import { pollForDialog } from './dialog.js';
 
 export async function click({ by, value }) {
   const escaped = JSON.stringify(value);
@@ -117,9 +118,12 @@ export async function layoutList() {
   return { success: true, layout_count: layouts?.layouts?.length || 0, source: layouts?.source, layouts: layouts?.layouts || [], error: layouts?.error };
 }
 
-export async function layoutSwitch({ name }) {
+export async function layoutSwitch({ name, _deps } = {}) {
+  const _evaluate = _deps?.evaluate || evaluate;
+  const _evaluateAsync = _deps?.evaluateAsync || evaluateAsync;
+  const _sleep = _deps?.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
   const escaped = JSON.stringify(name);
-  const result = await evaluateAsync(`
+  const result = await _evaluateAsync(`
     new Promise(function(resolve) {
       try {
         var target = ${escaped};
@@ -140,24 +144,9 @@ export async function layoutSwitch({ name }) {
   `);
   if (!result?.success) throw new Error(result?.error || 'Unknown error switching layout');
 
-  // Handle "unsaved changes" confirmation dialog
-  await new Promise(r => setTimeout(r, 500));
-  const dismissed = await evaluate(`
-    (function() {
-      var btns = document.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        var text = btns[i].textContent.trim();
-        if (/open anyway|don't save|discard/i.test(text)) {
-          btns[i].click();
-          return true;
-        }
-      }
-      return false;
-    })()
-  `);
-
-  if (dismissed) await new Promise(r => setTimeout(r, 1000));
-  return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_dialog_dismissed: dismissed };
+  const _d = { evaluate: _evaluate, sleep: _sleep };
+  const dialog = await pollForDialog(_d);
+  return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_dialog_dismissed: dialog.handled };
 }
 
 export async function keyboard({ key, modifiers }) {

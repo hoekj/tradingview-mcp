@@ -4,6 +4,7 @@
  * They throw on error (callers catch and format).
  */
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
+import { pollForDialog } from './dialog.js';
 
 function _resolve(deps) {
   return {
@@ -101,8 +102,8 @@ export async function ensurePineEditorOpen(_deps) {
 // slot a save will write into, regardless of what was injected into the buffer.
 const READ_OPEN_SCRIPT_NAME = `
   (function __readOpenScriptName() {
-    // The title element is a DIV with aria-haspopup="menu", not a <button>
-    var btn = document.querySelector('[class*="nameButton"][aria-haspopup]');
+    // data-qa-id is stable across TV deployments; class names are hashed.
+    var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
     if (!btn) return null;
     return (btn.textContent || '').trim() || null;
   })()
@@ -512,12 +513,15 @@ export async function save({ _deps } = {}) {
   await d.sleep(800);
 
   // Handle "Save Script" name dialog that appears for new/unsaved scripts
-  const dialog = await d.evaluate(saveNameDialogExpr(null));
-  if (dialog?.handled) await d.sleep(500);
+  const nameDialog = await d.evaluate(saveNameDialogExpr(null));
+  if (nameDialog?.handled) await d.sleep(500);
+
+  // Handle override confirmation that appears when saving existing scripts
+  await pollForDialog(d);
 
   const { saved_to, note } = await resolveSaveTarget(d, before);
   return applySaveTracking(
-    { success: true, action: dialog?.handled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' },
+    { success: true, action: nameDialog?.handled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' },
     saved_to, note
   );
 }
@@ -684,10 +688,10 @@ export async function newScript({ type = 'indicator', name, _deps } = {}) {
   }
 
   // The Pine editor's script menu lives behind the script-title button
-  // ("nameButton", aria-haspopup="menu"): title → "Create new" → type.
+  // (data-qa-id="pine-script-title-button"): title → "Create new" → type.
   const menu = await d.evaluate(`
     (function __openScriptTitleMenu() {
-      var btn = document.querySelector('[class*="nameButton"][aria-haspopup]');
+      var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
       if (!btn || btn.offsetParent === null) return { clicked: false };
       var label = (btn.textContent || '').trim();
       // clicking while expanded would close the menu instead of opening it
@@ -750,28 +754,8 @@ export async function newScript({ type = 'indicator', name, _deps } = {}) {
 
   // TradingView may ask about unsaved changes in the previous buffer.
   // Never click "Save" here — that would write into the previous slot.
-  // The confirm dialog is position:fixed (offsetParent === null), so match a
-  // visible "Don't save"/"Discard" button directly rather than scanning
-  // dialog containers. Never click "Save" — that writes the previous slot.
-  const dialog = await d.evaluate(`
-    (function __dismissUnsavedChangesDialog() {
-      var btns = document.querySelectorAll('button');
-      var sawSave = false;
-      for (var i = 0; i < btns.length; i++) {
-        var btn = btns[i];
-        if (!btn.getClientRects().length) continue;
-        var t = (btn.textContent || '').trim();
-        if (/don.?t save|discard changes|^discard$/i.test(t)) {
-          btn.click();
-          return { found: true, action: t };
-        }
-        if (/^save( changes)?$/i.test(t)) sawSave = true;
-      }
-      // A lone Save button with no discard option means an unexpected dialog.
-      return { found: false, ambiguous: sawSave };
-    })()
-  `);
-  if (dialog?.found) await d.sleep(400);
+  const dialog = await pollForDialog(d);
+  if (dialog.handled) await d.sleep(400);
 
   // Save the fresh buffer so TradingView allocates a new script slot.
   // Ctrl+S is focus-dependent (chart focus saves the layout instead), so
@@ -833,63 +817,136 @@ export async function newScript({ type = 'indicator', name, _deps } = {}) {
 }
 
 export async function openScript({ name, _deps }) {
-  const { evaluateAsync } = _resolve(_deps);
+  const d = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen(_deps);
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
-  const escapedName = JSON.stringify(name.toLowerCase());
+  // Resolve the target script from the saved-script list before touching the UI.
+  const { scripts, error } = await fetchScriptList(d.evaluateAsync);
+  if (!scripts) throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
 
-  const result = await evaluateAsync(`
-    (function() {
-      var target = ${escapedName};
-      return fetch('https://pine-facade.tradingview.com/pine-facade/list/?filter=saved', { credentials: 'include' })
-        .then(function(r) { return r.json(); })
-        .then(function(scripts) {
-          if (!Array.isArray(scripts)) return {error: 'pine-facade returned unexpected data'};
-          var match = null;
-          for (var i = 0; i < scripts.length; i++) {
-            var sn = (scripts[i].scriptName || '').toLowerCase();
-            var st = (scripts[i].scriptTitle || '').toLowerCase();
-            if (sn === target || st === target) { match = scripts[i]; break; }
-          }
-          if (!match) {
-            for (var j = 0; j < scripts.length; j++) {
-              var sn2 = (scripts[j].scriptName || '').toLowerCase();
-              var st2 = (scripts[j].scriptTitle || '').toLowerCase();
-              if (sn2.indexOf(target) !== -1 || st2.indexOf(target) !== -1) { match = scripts[j]; break; }
-            }
-          }
-          if (!match) return {error: 'Script "' + target + '" not found. Use pine_list_scripts to see available scripts.'};
-
-          var id = match.scriptIdPart;
-          var ver = match.version || 1;
-          return fetch('https://pine-facade.tradingview.com/pine-facade/get/' + id + '/' + ver, { credentials: 'include' })
-            .then(function(r2) { return r2.json(); })
-            .then(function(data) {
-              var source = data.source || '';
-              if (!source) return {error: 'Script source is empty', name: match.scriptName || match.scriptTitle};
-              var m = ${FIND_MONACO};
-              if (m) {
-                m.editor.setValue(source);
-                return {success: true, name: match.scriptName || match.scriptTitle, id: id, lines: source.split('\\n').length};
-              }
-              return {error: 'Monaco editor not found to inject source', name: match.scriptName || match.scriptTitle};
-            });
-        })
-        .catch(function(e) { return {error: e.message}; });
-    })()
-  `);
-
-  if (result?.error) {
-    throw new Error(result.error);
+  const target = name.toLowerCase();
+  let match = scripts.find(s =>
+    s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target
+  );
+  if (!match) {
+    match = scripts.find(s =>
+      s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target)
+    );
+  }
+  if (!match) {
+    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
   }
 
-  // Note: this loads the script's source into the open buffer; TradingView
-  // still considers the previously open slot active. The tracker lets the
-  // save paths warn when a save lands in a different slot than expected.
-  _trackedOpenScript = { id: result.id, name: result.name };
+  const scriptId = match.id;
+  const scriptName = match.name;
 
-  return { success: true, name: result.name, script_id: result.id, lines: result.lines, source: 'internal_api', opened: true };
+  // Click the script title button to open the menu.
+  const menu = await d.evaluate(`
+    (function __openScriptTitleMenu() {
+      var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
+      if (!btn || btn.offsetParent === null) return { clicked: false };
+      var label = (btn.textContent || '').trim();
+      if (btn.getAttribute('aria-expanded') === 'true') {
+        return { clicked: true, label: label, already_open: true };
+      }
+      btn.click();
+      return { clicked: true, label: label };
+    })()
+  `);
+  if (!menu?.clicked) {
+    throw new Error('Could not find the Pine editor script title menu button.');
+  }
+  await d.sleep(400);
+
+  // Click "Open script…" in the dropdown.
+  const openItem = await d.evaluate(`
+    (function __clickOpenScriptMenuItem() {
+      var els = document.querySelectorAll('[role="menuitem"]');
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (el.offsetParent === null) continue;
+        if (/open script/i.test((el.textContent || '').trim())) {
+          el.click();
+          return { clicked: true };
+        }
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { clicked: false };
+    })()
+  `);
+  if (!openItem?.clicked) {
+    throw new Error('Could not find the "Open script…" item in the Pine editor script menu.');
+  }
+  await d.sleep(500);
+
+  // Type the resolved script name into the search box of the Open Script dialog.
+  const searched = await d.evaluate(`
+    (function __typeInScriptSearch() {
+      var input = null;
+      var candidates = document.querySelectorAll('input');
+      for (var i = 0; i < candidates.length; i++) {
+        if (candidates[i].placeholder === 'Search' && candidates[i].offsetParent !== null) {
+          input = candidates[i];
+          break;
+        }
+      }
+      if (!input) { return { found: false }; }
+      input.focus();
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(scriptName)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return { found: true };
+    })()
+  `);
+  if (!searched?.found) {
+    // Dialog is open but search input not found — leave dialog open so user can see state.
+    throw new Error('Could not find the search input in the Open Script dialog.');
+  }
+  await d.sleep(400);
+
+  // Click the matching script in the filtered list.
+  // The onClick lives on the inner itemInfo element, not the itemRow container.
+  // If there is no unique exact match, leave the dialog open so the user can
+  // see the filtered results and select manually.
+  const listClick = await d.evaluate(`
+    (function __clickScriptListItem() {
+      var targetName = ${JSON.stringify(scriptName.toLowerCase())};
+      var items = Array.from(document.querySelectorAll('[class*="itemRow-"]')).filter(function(el) {
+        return el.offsetParent !== null;
+      });
+      // Prefer an exact title match.
+      for (var i = 0; i < items.length; i++) {
+        var titleEl = items[i].querySelector('[class*="titleText-"]');
+        if (titleEl && titleEl.textContent.trim().toLowerCase() === targetName) {
+          var infoEl = items[i].querySelector('[class*="itemInfo-"]');
+          (infoEl || items[i]).click();
+          return { clicked: true, name: titleEl.textContent.trim() };
+        }
+      }
+      // Fallback: only safe to click when exactly one item remains after filtering.
+      if (items.length === 1) {
+        var t = items[0].querySelector('[class*="titleText-"]');
+        var inf = items[0].querySelector('[class*="itemInfo-"]');
+        (inf || items[0]).click();
+        return { clicked: true, name: t ? t.textContent.trim() : '' };
+      }
+      // Ambiguous or not found — leave dialog open.
+      return { clicked: false, visible: items.length };
+    })()
+  `);
+  if (!listClick?.clicked) {
+    const hint = listClick?.visible > 1
+      ? `${listClick.visible} scripts match "${scriptName}" — use a more specific name.`
+      : `"${scriptName}" not found in the Open Script dialog.`;
+    throw new Error(hint);
+  }
+  await d.sleep(400);
+
+  await pollForDialog(d);
+
+  _trackedOpenScript = { id: scriptId, name: scriptName };
+  return { success: true, name: scriptName, script_id: scriptId, opened: true };
 }
 
 export async function listScripts({ _deps } = {}) {

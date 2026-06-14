@@ -29,10 +29,13 @@ function makeDeps({
   titleMenu = { clicked: true, label: 'Script A' },
   createNewItem = { clicked: true },
   newMenuItem = { clicked: true, label: 'Indicator' },
-  unsavedDialog = { found: false },
+  dialogResult = { handled: false },
   saveNameDialog = { handled: true },
   compileButton = 'Pine Save',
   editorSaveButton = { clicked: true },
+  openScriptMenuItem = { clicked: true },
+  scriptSearch = { found: true },
+  scriptListClick = { clicked: true, name: 'Script A' },
 } = {}) {
   const calls = [];
   let listIdx = 0;
@@ -44,9 +47,12 @@ function makeDeps({
       return { scripts: list };
     }
     if (expr.includes('__openScriptTitleMenu')) { return titleMenu; }
+    if (expr.includes('__clickOpenScriptMenuItem')) { return openScriptMenuItem; }
+    if (expr.includes('__typeInScriptSearch')) { return scriptSearch; }
+    if (expr.includes('__clickScriptListItem')) { return scriptListClick; }
     if (expr.includes('__clickCreateNewMenuItem')) { return createNewItem; }
     if (expr.includes('__clickNewScriptMenuItem')) { return newMenuItem; }
-    if (expr.includes('__dismissUnsavedChangesDialog')) { return unsavedDialog; }
+    if (expr.includes('__dismissDialog')) { return dialogResult; }
     if (expr.includes('__clickEditorSaveButton')) { return editorSaveButton; }
     if (expr.includes('__handleSaveNameDialog')) { return saveNameDialog; }
     if (expr.includes('__clickCompileButton')) { return compileButton; }
@@ -188,12 +194,19 @@ describe('newScript() — must create a real script slot', () => {
   it('dismisses an unsaved-changes prompt without saving the old buffer', async () => {
     const m = makeDeps({
       lists: [[SCRIPT_A], [SCRIPT_A, SCRIPT_NEW]],
-      unsavedDialog: { found: true, action: 'discarded' },
+      dialogResult: { handled: true, action: 'discard', button_text: "Don't save" },
     });
     const result = await newScript({ type: 'indicator', _deps: m._deps });
     assert.equal(result.success, true);
-    const dismissCall = m.calls.find(c => c.includes('__dismissUnsavedChangesDialog'));
-    assert.ok(dismissCall, 'expected an unsaved-changes dialog check');
+    const dismissCall = m.calls.find(c => c.includes('__dismissDialog'));
+    assert.ok(dismissCall, 'expected pollForDialog call for pending-changes dialog');
+  });
+
+  it('calls pollForDialog after menu navigation (not a one-shot check)', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A], [SCRIPT_A, SCRIPT_NEW]] });
+    await newScript({ type: 'indicator', _deps: m._deps });
+    const dialogCalls = m.calls.filter(c => c.includes('__dismissDialog'));
+    assert.ok(dialogCalls.length > 0, 'expected at least one pollForDialog evaluate call');
   });
 });
 
@@ -224,6 +237,14 @@ describe('save() — must report the slot it wrote into', () => {
     const result = await save({ _deps: m._deps });
     assert.ok(result.warning, 'expected a mismatch warning');
     assert.ok(result.warning.includes('Script A'), 'warning should name the actually-saved script');
+  });
+
+  it('polls for override confirmation dialog after save-name dialog', async () => {
+    const bumped = { ...SCRIPT_A, version: '6.0', modified: 1500 };
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B], [bumped, SCRIPT_B]] });
+    await save({ _deps: m._deps });
+    const dialogCalls = m.calls.filter(c => c.includes('__dismissDialog'));
+    assert.ok(dialogCalls.length > 0, 'expected pollForDialog call after Ctrl+S in save()');
   });
 });
 
@@ -273,17 +294,37 @@ describe('getSource() — identifies the open script', () => {
 
 // ── openScript() ─────────────────────────────────────────────────────────
 
-describe('openScript() — tracks what the caller believes is open', () => {
-  it('records the opened script for later mismatch detection', async () => {
-    const handler = async (expr) => {
-      if (expr.includes('pine-facade/list')) {
-        return { success: true, name: 'Script A', id: 'USER;aaa', lines: 3 };
-      }
-      if (expr.includes('findMonacoEditor')) { return true; }
-      return undefined;
-    };
-    const _deps = { evaluate: handler, evaluateAsync: handler, sleep: async () => {} };
-    await openScript({ name: 'Script A', _deps });
+describe('openScript() — navigates the Open Script UI to switch the active slot', () => {
+  it('sets the tracked open script for later mismatch detection', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await openScript({ name: 'Script A', _deps: m._deps });
     assert.equal(getTrackedOpenScript().id, 'USER;aaa');
+    assert.equal(getTrackedOpenScript().name, 'Script A');
+  });
+
+  it('drives the full title-menu → Open → search → click flow', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await openScript({ name: 'Script A', _deps: m._deps });
+    assert.ok(m.calls.some(c => c.includes('__openScriptTitleMenu')), 'expected title menu click');
+    assert.ok(m.calls.some(c => c.includes('__clickOpenScriptMenuItem')), 'expected Open Script menu item click');
+    assert.ok(m.calls.some(c => c.includes('__typeInScriptSearch')), 'expected script name typed in search');
+    assert.ok(m.calls.some(c => c.includes('__clickScriptListItem')), 'expected script list item click');
+  });
+
+  it('polls for dialogs after clicking the script list item', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await openScript({ name: 'Script A', _deps: m._deps });
+    assert.ok(
+      m.calls.some(c => c.includes('__dismissDialog')),
+      'expected pollForDialog evaluate call after list item click'
+    );
+  });
+
+  it('throws when the script name is not found', async () => {
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B]] });
+    await assert.rejects(
+      openScript({ name: 'Nonexistent Script', _deps: m._deps }),
+      /not found/i
+    );
   });
 });
