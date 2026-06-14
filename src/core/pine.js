@@ -102,8 +102,8 @@ export async function ensurePineEditorOpen(_deps) {
 // slot a save will write into, regardless of what was injected into the buffer.
 const READ_OPEN_SCRIPT_NAME = `
   (function __readOpenScriptName() {
-    // The title element is a DIV with aria-haspopup="menu", not a <button>
-    var btn = document.querySelector('[class*="nameButton"][aria-haspopup]');
+    // data-qa-id is stable across TV deployments; class names are hashed.
+    var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
     if (!btn) return null;
     return (btn.textContent || '').trim() || null;
   })()
@@ -688,10 +688,10 @@ export async function newScript({ type = 'indicator', name, _deps } = {}) {
   }
 
   // The Pine editor's script menu lives behind the script-title button
-  // ("nameButton", aria-haspopup="menu"): title → "Create new" → type.
+  // (data-qa-id="pine-script-title-button"): title → "Create new" → type.
   const menu = await d.evaluate(`
     (function __openScriptTitleMenu() {
-      var btn = document.querySelector('[class*="nameButton"][aria-haspopup]');
+      var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
       if (!btn || btn.offsetParent === null) return { clicked: false };
       var label = (btn.textContent || '').trim();
       // clicking while expanded would close the menu instead of opening it
@@ -844,7 +844,7 @@ export async function openScript({ name, _deps }) {
   // Click the script title button to open the menu.
   const menu = await d.evaluate(`
     (function __openScriptTitleMenu() {
-      var btn = document.querySelector('[class*="nameButton"][aria-haspopup]');
+      var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
       if (!btn || btn.offsetParent === null) return { clicked: false };
       var label = (btn.textContent || '').trim();
       if (btn.getAttribute('aria-expanded') === 'true') {
