@@ -817,7 +817,7 @@ export async function newScript({ type = 'indicator', name, _deps } = {}) {
 }
 
 export async function openScript({ name, _deps }) {
-  const { evaluateAsync } = _resolve(_deps);
+  const { evaluate, evaluateAsync, sleep } = _resolve(_deps);
   const editorReady = await ensurePineEditorOpen(_deps);
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
@@ -867,6 +867,8 @@ export async function openScript({ name, _deps }) {
   if (result?.error) {
     throw new Error(result.error);
   }
+
+  await pollForDialog({ evaluate, sleep });
 
   // Note: this loads the script's source into the open buffer; TradingView
   // still considers the previously open slot active. The tracker lets the

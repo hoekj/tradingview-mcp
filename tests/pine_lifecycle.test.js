@@ -303,4 +303,22 @@ describe('openScript() — tracks what the caller believes is open', () => {
     await openScript({ name: 'Script A', _deps });
     assert.equal(getTrackedOpenScript().id, 'USER;aaa');
   });
+
+  it('polls for dialogs after injecting source into Monaco', async () => {
+    const calls = [];
+    const handler = async (expr) => {
+      calls.push(expr);
+      if (expr.includes('pine-facade/list')) {
+        return { success: true, name: 'Script A', id: 'USER;aaa', lines: 3 };
+      }
+      if (expr.includes('findMonacoEditor')) { return true; }
+      return undefined;
+    };
+    const _deps = { evaluate: handler, evaluateAsync: handler, sleep: async () => {} };
+    await openScript({ name: 'Script A', _deps });
+    assert.ok(
+      calls.some(c => c.includes('__dismissDialog')),
+      'expected pollForDialog evaluate call after setValue'
+    );
+  });
 });
