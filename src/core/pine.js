@@ -513,12 +513,15 @@ export async function save({ _deps } = {}) {
   await d.sleep(800);
 
   // Handle "Save Script" name dialog that appears for new/unsaved scripts
-  const dialog = await d.evaluate(saveNameDialogExpr(null));
-  if (dialog?.handled) await d.sleep(500);
+  const nameDialog = await d.evaluate(saveNameDialogExpr(null));
+  if (nameDialog?.handled) await d.sleep(500);
+
+  // Handle override confirmation that appears when saving existing scripts
+  await pollForDialog(d);
 
   const { saved_to, note } = await resolveSaveTarget(d, before);
   return applySaveTracking(
-    { success: true, action: dialog?.handled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' },
+    { success: true, action: nameDialog?.handled ? 'saved_with_dialog' : 'Ctrl+S_dispatched' },
     saved_to, note
   );
 }

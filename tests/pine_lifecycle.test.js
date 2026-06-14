@@ -234,6 +234,14 @@ describe('save() — must report the slot it wrote into', () => {
     assert.ok(result.warning, 'expected a mismatch warning');
     assert.ok(result.warning.includes('Script A'), 'warning should name the actually-saved script');
   });
+
+  it('polls for override confirmation dialog after save-name dialog', async () => {
+    const bumped = { ...SCRIPT_A, version: '6.0', modified: 1500 };
+    const m = makeDeps({ lists: [[SCRIPT_A, SCRIPT_B], [bumped, SCRIPT_B]] });
+    await save({ _deps: m._deps });
+    const dialogCalls = m.calls.filter(c => c.includes('__dismissDialog'));
+    assert.ok(dialogCalls.length > 0, 'expected pollForDialog call after Ctrl+S in save()');
+  });
 });
 
 // ── smartCompile() ───────────────────────────────────────────────────────
