@@ -49,22 +49,35 @@ that reproduces the `ReferenceError` (per systematic-debugging / TDD).
 
 ## `pine_delete`
 
-New core function `deleteScript({ id, name, _deps } = {})` in `src/core/pine.js`.
+New core function `deleteScript({ name, _deps } = {})` in `src/core/pine.js`.
 
-- Resolve the target from the saved-script list (`fetchScriptList`): match by exact `id`,
-  else exact `name`/`title` (case-insensitive). Refuse ambiguous or unmatched names with a
-  clear error (never guess — deleting is destructive). Require at least one of `id`/`name`.
-- Delete via an **authenticated in-browser fetch** using `evaluateAsync` with
-  `credentials: 'include'` — the same mechanism `fetchScriptList` uses so the logged-in
-  session cookies apply (a Node-side fetch has no session). The pine-facade delete endpoint
-  and HTTP method will be **verified live against the throwaway `zz_mcp_test_scratch` slot
-  before the code depends on it** — no assumed URL. If the REST endpoint cannot be
-  confirmed, fall back to a UI-driven delete (title menu → delete → confirm, modeled on
-  `openScript`).
-- Verify deletion by re-reading the list; return `{ success, deleted: true, id, name }`.
-  If `_trackedOpenScript` referenced the deleted slot, clear it.
+**Mechanism: native UI trash delete** (chosen over a facade REST call). The facade endpoint
+`POST /pine-facade/delete/{id}` was verified live to fully delete the backend script, but it
+leaves a stale entry in TradingView's own Open-Script dialog cache until the app reloads.
+Driving TradingView's native trash control goes through the app's own flow, so it is
+cache-consistent (no ghost). It reuses the exact dialog-opening steps `openScript` already
+uses.
+
+Flow:
+1. `ensurePineEditorOpen`, then resolve the target from `fetchScriptList`: exact `name`/`title`
+   match (case-insensitive), else unique substring. Refuse ambiguous/unmatched names with a
+   clear error (never guess — deleting is destructive).
+2. Open the Open-Script dialog: click `[data-qa-id="pine-script-title-button"]` →
+   `[role="menuitem"]` matching "Open script" → type the name into `input[placeholder="Search"]`.
+3. Find the row whose `[data-name="open-script-dialog-item-name"]` text equals the target
+   name, then click that row's `[data-name="remove-button"]` (aria-label "Remove"). **These
+   `data-name` attributes are the stable selectors** — the row/`itemInfo`/`title` classes are
+   hashed (`itemRow-<hash>`) and must not be relied on.
+4. Confirm the deletion dialog via `pollForDialog` (extend its confirm regex to also match
+   `^delete$` / `^remove$` if the live confirm button uses that copy — established by the e2e
+   test against a throwaway script).
+5. Verify by re-reading `fetchScriptList` (target absent). If `_trackedOpenScript` referenced
+   the deleted slot, clear it. Return `{ success, deleted: true, name, id }`.
 - Register `pine_delete` MCP tool (`src/tools/pine.js`) and `tv pine delete` CLI subcommand
   (`src/cli/commands/pine.js`), following the existing registration shapes.
+- **Selector coverage:** `pine.core.test.js` exercises the full create→delete round-trip
+  against a throwaway slot, which asserts the `data-name` selectors still resolve — so a TV
+  update that renames them fails the test loudly rather than silently.
 
 ## Test architecture
 
@@ -146,6 +159,9 @@ The old `tests/e2e.test.js` is deleted; its still-useful smoke intent is preserv
 
 ## Risks
 
-- pine-facade delete endpoint unverified → mitigated by live verification first + UI fallback.
+- `pine_delete` depends on TradingView DOM (Open-Script dialog + trash control). Mitigated by
+  using stable `data-name` selectors and covering the flow in `pine.core.test.js`, which fails
+  loudly if TV renames them. The delete-confirmation button copy is unknown until the e2e test
+  runs against a throwaway script; `pollForDialog`'s confirm matcher is widened accordingly.
 - Live tests depend on chart state (symbol availability, logged-in session) → snapshot/restore
   and skip-guards keep them non-destructive and resilient.
