@@ -33,7 +33,7 @@ describe('pine core round-trip (live e2e)', () => {
     const saved = await pine.save();
     assert.ok(saved.saved_to, 'save reports the slot it wrote');
     assert.equal(saved.saved_to.id, created.script.id, 'saved into the new slot');
-    assert.match(String(saved.saved_to.version), /^[2-9]/, 'version bumped past 1');
+    assert.ok(Number(saved.saved_to.version) >= 2, 'version bumped past 1');
 
     const read = await pine.getSource();
     assert.ok(read.source.includes(marker), 'getSource returns the injected marker (right editor)');

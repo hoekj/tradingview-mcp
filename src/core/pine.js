@@ -1107,6 +1107,25 @@ export async function deleteScript({ name, _deps } = {}) {
     throw new Error(`Clicked delete for "${match.name}" but it still appears in the saved-script list.`);
   }
 
+  // Best-effort: close the Open-Script dialog so it doesn't linger over the chart.
+  try {
+    await d.evaluate(`
+      (function __closeOpenScriptDialog() {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        var row = document.querySelector('[class*="itemRow-"]');
+        var dlg = row;
+        for (var i = 0; i < 15 && dlg; i++) { if (/dialog|popup/i.test((dlg.className || '').toString())) { break; } dlg = dlg.parentElement; }
+        if (dlg) {
+          var close = dlg.querySelector('[data-name="close"], button[aria-label="Close"], [class*="navButton-"]');
+          if (close && close.getClientRects().length) { close.click(); }
+        }
+        return true;
+      })()
+    `);
+  } catch (err) {
+    // ignore — dialog dismissal is cosmetic
+  }
+
   if (_trackedOpenScript && _trackedOpenScript.id === match.id) {
     _trackedOpenScript = null;
   }
