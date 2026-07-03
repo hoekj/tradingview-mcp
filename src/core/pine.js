@@ -995,6 +995,124 @@ export async function openScript({ name, _deps }) {
   return { success: true, name: scriptName, script_id: scriptId, opened: true };
 }
 
+export async function deleteScript({ name, _deps } = {}) {
+  if (!name) {
+    throw new Error('deleteScript requires a script name.');
+  }
+  const d = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen(_deps);
+  if (!editorReady) {
+    throw new Error('Could not open Pine Editor.');
+  }
+
+  const { scripts, error } = await fetchScriptList(d.evaluateAsync);
+  if (!scripts) {
+    throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
+  }
+  const target = name.toLowerCase();
+  let matches = scripts.filter(s => s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target);
+  if (matches.length === 0) {
+    matches = scripts.filter(s => s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target));
+  }
+  if (matches.length === 0) {
+    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`"${name}" matches ${matches.length} scripts — use an exact name.`);
+  }
+  const match = matches[0];
+
+  // Open Script dialog: title button -> "Open script" -> search.
+  const menu = await d.evaluate(`
+    (function __openScriptTitleMenu() {
+      var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
+      if (!btn || btn.offsetParent === null) return { clicked: false };
+      if (btn.getAttribute('aria-expanded') === 'true') return { clicked: true, already_open: true };
+      btn.click();
+      return { clicked: true };
+    })()
+  `);
+  if (!menu?.clicked) {
+    throw new Error('Could not open the Pine script title menu.');
+  }
+  await d.sleep(400);
+
+  const openItem = await d.evaluate(`
+    (function __clickOpenScriptMenuItem() {
+      var els = document.querySelectorAll('[role="menuitem"]');
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].offsetParent === null) continue;
+        if (/open script/i.test((els[i].textContent || '').trim())) { els[i].click(); return { clicked: true }; }
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { clicked: false };
+    })()
+  `);
+  if (!openItem?.clicked) {
+    throw new Error('Could not find the "Open script…" menu item.');
+  }
+  await d.sleep(500);
+
+  const searched = await d.evaluate(`
+    (function __typeInScriptSearch() {
+      var input = null, c = document.querySelectorAll('input');
+      for (var i = 0; i < c.length; i++) { if (c[i].placeholder === 'Search' && c[i].offsetParent !== null) { input = c[i]; break; } }
+      if (!input) return { found: false };
+      input.focus();
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(match.name)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return { found: true };
+    })()
+  `);
+  if (!searched?.found) {
+    throw new Error('Could not find the Open Script search input.');
+  }
+  await d.sleep(400);
+
+  // Click the row's stable trash control. Match by data-name="open-script-dialog-item-name".
+  const removed = await d.evaluate(`
+    (function __clickRemoveButton() {
+      var wanted = ${JSON.stringify(match.name.toLowerCase())};
+      var rows = Array.from(document.querySelectorAll('[class*="itemRow-"]')).filter(function(r) { return r.offsetParent !== null; });
+      for (var i = 0; i < rows.length; i++) {
+        var nameEl = rows[i].querySelector('[data-name="open-script-dialog-item-name"]');
+        if (!nameEl) continue;
+        if (nameEl.textContent.trim().toLowerCase() !== wanted) continue;
+        rows[i].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        var trash = rows[i].querySelector('[data-name="remove-button"]');
+        if (!trash) return { clicked: false, reason: 'no remove-button' };
+        trash.click();
+        return { clicked: true, name: nameEl.textContent.trim() };
+      }
+      return { clicked: false, reason: 'row not found' };
+    })()
+  `);
+  if (!removed?.clicked) {
+    throw new Error(`Could not click the trash control for "${match.name}" (${removed?.reason}).`);
+  }
+  await d.sleep(300);
+
+  // Confirm the delete dialog if one appears.
+  await pollForDialog(d);
+
+  // Verify removal from the facade list.
+  let gone = false;
+  for (let i = 0; i < 8; i++) {
+    await d.sleep(500);
+    const after = await fetchScriptList(d.evaluateAsync);
+    if (after.scripts && !after.scripts.some(s => s.id === match.id)) { gone = true; break; }
+  }
+  if (!gone) {
+    throw new Error(`Clicked delete for "${match.name}" but it still appears in the saved-script list.`);
+  }
+
+  if (_trackedOpenScript && _trackedOpenScript.id === match.id) {
+    _trackedOpenScript = null;
+  }
+  return { success: true, deleted: true, name: match.name, id: match.id };
+}
+
 export async function listScripts({ _deps } = {}) {
   const { evaluateAsync } = _resolve(_deps);
   const { scripts, error } = await fetchScriptList(evaluateAsync);
