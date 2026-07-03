@@ -54,6 +54,33 @@ describe('chart core (live e2e)', () => {
     const add = await chart.manageIndicator({ action: 'add', indicator: 'Volume' });
     assert.equal(add.success, true);
     assert.ok(add.entity_id);
+
+    // toggleVisibility: hide then restore the just-added study.
+    const hidden = await indicators.toggleVisibility({ entity_id: add.entity_id, visible: false });
+    assert.equal(hidden.success, true);
+    assert.equal(hidden.visible, false);
+    const shown = await indicators.toggleVisibility({ entity_id: add.entity_id, visible: true });
+    assert.equal(shown.success, true);
+    assert.equal(shown.visible, true);
+
+    // setInputs: inspect the live study's inputs and exercise a valid one if available.
+    const info = await data.getIndicator({ entity_id: add.entity_id });
+    assert.equal(info.success, true);
+    const numericInput = Array.isArray(info.inputs)
+      ? info.inputs.find(inp => typeof inp.value === 'number')
+      : undefined;
+    if (numericInput) {
+      const newValue = numericInput.value + 1;
+      const set = await indicators.setInputs({
+        entity_id: add.entity_id,
+        inputs: { [numericInput.id]: newValue },
+      });
+      assert.equal(set.success, true);
+      assert.equal(set.updated_inputs[numericInput.id], newValue);
+    } else {
+      await assert.rejects(() => indicators.setInputs({ entity_id: add.entity_id, inputs: {} }));
+    }
+
     const rm = await chart.manageIndicator({ action: 'remove', entity_id: add.entity_id });
     assert.equal(rm.success, true);
   });
