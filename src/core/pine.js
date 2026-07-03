@@ -30,8 +30,41 @@ export function _setTrackedOpenScript(value) {
 }
 
 // ── Monaco finder (injected into TV page) ──
+
+/**
+ * Selects the active Pine editor from all live Monaco instances.
+ *
+ * TradingView keeps several Monaco editors alive at once (one per recently
+ * opened script). The active Pine buffer is the visible, writable one —
+ * getEditors()[0] is often a hidden read-only instance, so blindly taking it
+ * makes reads/writes hit the wrong buffer and saves persist nothing.
+ *
+ * Kept as a standalone function so it is unit-testable: its source is inlined
+ * into FIND_MONACO via toString(), so the browser and the tests run identical
+ * selection logic. Editors expose Monaco's getRawOptions()/getDomNode().
+ */
+export function pickPineEditor(editors) {
+  function isWritable(e) {
+    try { return !e.getRawOptions().readOnly; } catch (err) { return true; }
+  }
+  function isVisible(e) {
+    try {
+      var dom = e.getDomNode();
+      return !!(dom && dom.getClientRects().length);
+    } catch (err) { return false; }
+  }
+  for (var i = 0; i < editors.length; i++) {
+    if (isVisible(editors[i]) && isWritable(editors[i])) return editors[i];
+  }
+  for (var j = 0; j < editors.length; j++) {
+    if (isWritable(editors[j])) return editors[j];
+  }
+  return editors[0];
+}
+
 const FIND_MONACO = `
   (function findMonacoEditor() {
+    var __pickPineEditor = ${pickPineEditor.toString()};
     var container = document.querySelector('.monaco-editor.pine-editor-monaco');
     if (!container) return null;
     var el = container;
@@ -50,7 +83,10 @@ const FIND_MONACO = `
         var env = current.memoizedProps.value.monacoEnv;
         if (env.editor && typeof env.editor.getEditors === 'function') {
           var editors = env.editor.getEditors();
-          if (editors.length > 0) return { editor: editors[0], env: env };
+          if (editors.length > 0) {
+            var picked = __pickPineEditor(editors);
+            if (picked) return { editor: picked, env: env };
+          }
         }
       }
       current = current.return;
@@ -311,12 +347,22 @@ export async function setSource({ source, _deps }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      var model = m.editor.getModel();
+      if (!model) return false;
+      // executeEdits (not setValue): setValue fires an isFlush change that
+      // TradingView's dirty tracking ignores, leaving the save button disabled
+      // so Ctrl+S/save persists nothing. A real edit flips the buffer dirty.
+      m.editor.executeEdits('mcp-set-source', [{
+        range: model.getFullModelRange(),
+        text: ${escaped},
+        forceMoveMarkers: true,
+      }]);
+      m.editor.pushUndoStop();
       return true;
     })()
   `);
 
-  if (!set) throw new Error('Monaco found but setValue() failed.');
+  if (!set) throw new Error('Monaco found but executeEdits() failed.');
   const openScriptName = await evaluate(READ_OPEN_SCRIPT_NAME);
   return {
     success: true,
