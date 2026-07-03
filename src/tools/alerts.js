@@ -17,10 +17,11 @@ export function registerAlertTools(server) {
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 
-  server.tool('alert_delete', 'Delete all alerts or open context menu for deletion', {
+  server.tool('alert_delete', 'Delete a single alert by id, or delete all alerts (opens context menu for manual confirmation)', {
+    alert_id: z.union([z.string(), z.number()]).optional().describe('Id of a single alert to delete (targeted, safe)'),
     delete_all: z.coerce.boolean().optional().describe('Delete all alerts'),
-  }, async ({ delete_all }) => {
-    try { return jsonResult(await core.deleteAlerts({ delete_all })); }
+  }, async ({ alert_id, delete_all }) => {
+    try { return jsonResult(await core.deleteAlerts({ alert_id, delete_all })); }
     catch (err) { return jsonResult({ success: false, error: err.message }, true); }
   });
 }
