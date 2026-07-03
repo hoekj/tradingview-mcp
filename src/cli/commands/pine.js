@@ -93,6 +93,13 @@ register('pine', {
         return core.openScript({ name: positionals.join(' ') });
       },
     }],
+    ['delete', {
+      description: 'Delete a saved Pine Script by name',
+      handler: (opts, positionals) => {
+        if (!positionals[0]) throw new Error('Script name required. Usage: tv pine delete "My Script"');
+        return core.deleteScript({ name: positionals.join(' ') });
+      },
+    }],
     ['list', {
       description: 'List saved Pine Scripts',
       handler: () => core.listScripts(),
