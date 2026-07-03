@@ -3,6 +3,7 @@
  * All functions accept plain options objects and return plain JS objects.
  * They throw on error (callers catch and format).
  */
+import https from 'node:https';
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
 import { pollForDialog } from './dialog.js';
 
@@ -13,6 +14,44 @@ function _resolve(deps) {
     getClient: deps?.getClient || _getClient,
     sleep: deps?.sleep || ((ms) => new Promise(r => setTimeout(r, ms))),
   };
+}
+
+/**
+ * POST a form body over HTTPS from Node and return { status, statusText, body }.
+ * Uses `agent: false` so the connection is not kept alive in a pool: it closes
+ * as soon as the response ends. Global `fetch` (undici) instead leaves an idle
+ * keep-alive socket behind, whose async handle crashes libuv on process teardown
+ * on Windows (`!(handle->flags & UV_HANDLE_CLOSING)`) — which broke the one-shot
+ * `tv pine check` CLI. A fresh, self-closing connection avoids that entirely.
+ */
+function httpsPostForm(urlString, formBody, headers) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const body = Buffer.from(formBody, 'utf-8');
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: { ...headers, 'Content-Length': body.length },
+        agent: false,
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          resolve({
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            body: Buffer.concat(chunks).toString('utf-8'),
+          });
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 // ── Open-script tracking (guard rail against overwriting the wrong slot) ──
@@ -30,8 +69,41 @@ export function _setTrackedOpenScript(value) {
 }
 
 // ── Monaco finder (injected into TV page) ──
+
+/**
+ * Selects the active Pine editor from all live Monaco instances.
+ *
+ * TradingView keeps several Monaco editors alive at once (one per recently
+ * opened script). The active Pine buffer is the visible, writable one —
+ * getEditors()[0] is often a hidden read-only instance, so blindly taking it
+ * makes reads/writes hit the wrong buffer and saves persist nothing.
+ *
+ * Kept as a standalone function so it is unit-testable: its source is inlined
+ * into FIND_MONACO via toString(), so the browser and the tests run identical
+ * selection logic. Editors expose Monaco's getRawOptions()/getDomNode().
+ */
+export function pickPineEditor(editors) {
+  function isWritable(e) {
+    try { return !e.getRawOptions().readOnly; } catch (err) { return true; }
+  }
+  function isVisible(e) {
+    try {
+      var dom = e.getDomNode();
+      return !!(dom && dom.getClientRects().length);
+    } catch (err) { return false; }
+  }
+  for (var i = 0; i < editors.length; i++) {
+    if (isVisible(editors[i]) && isWritable(editors[i])) return editors[i];
+  }
+  for (var j = 0; j < editors.length; j++) {
+    if (isWritable(editors[j])) return editors[j];
+  }
+  return editors[0];
+}
+
 const FIND_MONACO = `
   (function findMonacoEditor() {
+    var __pickPineEditor = ${pickPineEditor.toString()};
     var container = document.querySelector('.monaco-editor.pine-editor-monaco');
     if (!container) return null;
     var el = container;
@@ -50,7 +122,10 @@ const FIND_MONACO = `
         var env = current.memoizedProps.value.monacoEnv;
         if (env.editor && typeof env.editor.getEditors === 'function') {
           var editors = env.editor.getEditors();
-          if (editors.length > 0) return { editor: editors[0], env: env };
+          if (editors.length > 0) {
+            var picked = __pickPineEditor(editors);
+            if (picked) return { editor: picked, env: env };
+          }
         }
       }
       current = current.return;
@@ -223,24 +298,21 @@ export async function check({ source }) {
   const formData = new URLSearchParams();
   formData.append('source', source);
 
-  const response = await fetch(
+  const response = await httpsPostForm(
     'https://pine-facade.tradingview.com/pine-facade/translate_light?user_name=Guest&pine_id=00000000-0000-0000-0000-000000000000',
+    formData.toString(),
     {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://www.tradingview.com/',
-      },
-      body: formData,
+      'Accept': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Referer': 'https://www.tradingview.com/',
     }
   );
 
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`TradingView API returned ${response.status}: ${response.statusText}`);
   }
 
-  const result = await response.json();
+  const result = JSON.parse(response.body);
   const errors = [];
   const warnings = [];
   const inner = result?.result;
@@ -311,12 +383,22 @@ export async function setSource({ source, _deps }) {
     (function() {
       var m = ${FIND_MONACO};
       if (!m) return false;
-      m.editor.setValue(${escaped});
+      var model = m.editor.getModel();
+      if (!model) return false;
+      // executeEdits (not setValue): setValue fires an isFlush change that
+      // TradingView's dirty tracking ignores, leaving the save button disabled
+      // so Ctrl+S/save persists nothing. A real edit flips the buffer dirty.
+      m.editor.executeEdits('mcp-set-source', [{
+        range: model.getFullModelRange(),
+        text: ${escaped},
+        forceMoveMarkers: true,
+      }]);
+      m.editor.pushUndoStop();
       return true;
     })()
   `);
 
-  if (!set) throw new Error('Monaco found but setValue() failed.');
+  if (!set) throw new Error('Monaco found but executeEdits() failed.');
   const openScriptName = await evaluate(READ_OPEN_SCRIPT_NAME);
   return {
     success: true,
@@ -414,6 +496,37 @@ async function fetchScriptList(evaluateAsync) {
       .catch(function(e) { return { scripts: null, error: e.message }; })
   `);
   return { scripts: data?.scripts ?? null, error: data?.error };
+}
+
+/**
+ * Resolves a saved script by name from the pine-facade list. Matching is
+ * case-insensitive: an exact match on name or title wins, otherwise the first
+ * substring match. Throws if the list can't be fetched or nothing matches.
+ * Pass `{ unique: true }` for destructive callers (e.g. deleteScript) so an
+ * ambiguous name throws instead of silently acting on the wrong slot; the
+ * default returns the first match (openScript's lenient behaviour).
+ */
+async function resolveScriptByName(name, evaluateAsync, { unique = false } = {}) {
+  const { scripts, error } = await fetchScriptList(evaluateAsync);
+  if (!scripts) {
+    throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
+  }
+  const target = name.toLowerCase();
+  let matches = scripts.filter(s =>
+    s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target
+  );
+  if (matches.length === 0) {
+    matches = scripts.filter(s =>
+      s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target)
+    );
+  }
+  if (matches.length === 0) {
+    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
+  }
+  if (unique && matches.length > 1) {
+    throw new Error(`"${name}" matches ${matches.length} scripts — use an exact name.`);
+  }
+  return matches[0];
 }
 
 /**
@@ -822,22 +935,7 @@ export async function openScript({ name, _deps }) {
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   // Resolve the target script from the saved-script list before touching the UI.
-  const { scripts, error } = await fetchScriptList(d.evaluateAsync);
-  if (!scripts) throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
-
-  const target = name.toLowerCase();
-  let match = scripts.find(s =>
-    s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target
-  );
-  if (!match) {
-    match = scripts.find(s =>
-      s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target)
-    );
-  }
-  if (!match) {
-    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
-  }
-
+  const match = await resolveScriptByName(name, d.evaluateAsync);
   const scriptId = match.id;
   const scriptName = match.name;
 
@@ -947,6 +1045,128 @@ export async function openScript({ name, _deps }) {
 
   _trackedOpenScript = { id: scriptId, name: scriptName };
   return { success: true, name: scriptName, script_id: scriptId, opened: true };
+}
+
+export async function deleteScript({ name, _deps } = {}) {
+  if (!name) {
+    throw new Error('deleteScript requires a script name.');
+  }
+  const d = _resolve(_deps);
+  const editorReady = await ensurePineEditorOpen(_deps);
+  if (!editorReady) {
+    throw new Error('Could not open Pine Editor.');
+  }
+
+  const match = await resolveScriptByName(name, d.evaluateAsync, { unique: true });
+
+  // Open Script dialog: title button -> "Open script" -> search.
+  const menu = await d.evaluate(`
+    (function __openScriptTitleMenu() {
+      var btn = document.querySelector('[data-qa-id="pine-script-title-button"]');
+      if (!btn || btn.offsetParent === null) return { clicked: false };
+      if (btn.getAttribute('aria-expanded') === 'true') return { clicked: true, already_open: true };
+      btn.click();
+      return { clicked: true };
+    })()
+  `);
+  if (!menu?.clicked) {
+    throw new Error('Could not open the Pine script title menu.');
+  }
+  await d.sleep(400);
+
+  const openItem = await d.evaluate(`
+    (function __clickOpenScriptMenuItem() {
+      var els = document.querySelectorAll('[role="menuitem"]');
+      for (var i = 0; i < els.length; i++) {
+        if (els[i].offsetParent === null) continue;
+        if (/open script/i.test((els[i].textContent || '').trim())) { els[i].click(); return { clicked: true }; }
+      }
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { clicked: false };
+    })()
+  `);
+  if (!openItem?.clicked) {
+    throw new Error('Could not find the "Open script…" menu item.');
+  }
+  await d.sleep(500);
+
+  const searched = await d.evaluate(`
+    (function __typeInScriptSearch() {
+      var input = null, c = document.querySelectorAll('input');
+      for (var i = 0; i < c.length; i++) { if (c[i].placeholder === 'Search' && c[i].offsetParent !== null) { input = c[i]; break; } }
+      if (!input) return { found: false };
+      input.focus();
+      var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(input, ${JSON.stringify(match.name)});
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return { found: true };
+    })()
+  `);
+  if (!searched?.found) {
+    throw new Error('Could not find the Open Script search input.');
+  }
+  await d.sleep(400);
+
+  // Click the row's stable trash control. Match by data-name="open-script-dialog-item-name".
+  const removed = await d.evaluate(`
+    (function __clickRemoveButton() {
+      var wanted = ${JSON.stringify(match.name.toLowerCase())};
+      var rows = Array.from(document.querySelectorAll('[class*="itemRow-"]')).filter(function(r) { return r.offsetParent !== null; });
+      for (var i = 0; i < rows.length; i++) {
+        var nameEl = rows[i].querySelector('[data-name="open-script-dialog-item-name"]');
+        if (!nameEl) continue;
+        if (nameEl.textContent.trim().toLowerCase() !== wanted) continue;
+        rows[i].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        var trash = rows[i].querySelector('[data-name="remove-button"]');
+        if (!trash) return { clicked: false, reason: 'no remove-button' };
+        trash.click();
+        return { clicked: true, name: nameEl.textContent.trim() };
+      }
+      return { clicked: false, reason: 'row not found' };
+    })()
+  `);
+  if (!removed?.clicked) {
+    throw new Error(`Could not click the trash control for "${match.name}" (${removed?.reason}).`);
+  }
+  await d.sleep(300);
+
+  // Confirm the delete dialog if one appears.
+  await pollForDialog(d);
+
+  // Verify removal from the facade list.
+  let gone = false;
+  for (let i = 0; i < 8; i++) {
+    await d.sleep(500);
+    const after = await fetchScriptList(d.evaluateAsync);
+    if (after.scripts && !after.scripts.some(s => s.id === match.id)) { gone = true; break; }
+  }
+  if (!gone) {
+    throw new Error(`Clicked delete for "${match.name}" but it still appears in the saved-script list.`);
+  }
+
+  // Best-effort: close the Open-Script dialog so it doesn't linger over the chart.
+  try {
+    await d.evaluate(`
+      (function __closeOpenScriptDialog() {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        var row = document.querySelector('[class*="itemRow-"]');
+        var dlg = row;
+        for (var i = 0; i < 15 && dlg; i++) { if (/dialog|popup/i.test((dlg.className || '').toString())) { break; } dlg = dlg.parentElement; }
+        if (dlg) {
+          var close = dlg.querySelector('[data-name="close"], button[aria-label="Close"], [class*="navButton-"]');
+          if (close && close.getClientRects().length) { close.click(); }
+        }
+        return true;
+      })()
+    `);
+  } catch (err) {
+    // ignore — dialog dismissal is cosmetic
+  }
+
+  if (_trackedOpenScript && _trackedOpenScript.id === match.id) {
+    _trackedOpenScript = null;
+  }
+  return { success: true, deleted: true, name: match.name, id: match.id };
 }
 
 export async function listScripts({ _deps } = {}) {

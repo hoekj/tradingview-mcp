@@ -1,0 +1,15 @@
+# Preserve every file's line endings verbatim — do NOT normalize.
+#
+# The repository baseline is mixed: most text files are LF, a handful are CRLF.
+# A prior `* text=auto` rewrote every CRLF blob to LF on commit, which made
+# those unchanged files render as fully modified (no-op, line-ending-only diffs)
+# in pull requests. `-text` disables end-of-line conversion for all files
+# regardless of a contributor's core.autocrlf setting, so each file keeps its
+# existing endings on add and checkout and nothing is silently flipped. Diff and
+# merge still treat these as text (unlike `binary`).
+* -text
+
+# Images: no line-ending conversion, and no diff/merge either.
+*.png binary
+*.jpg binary
+*.ico binary

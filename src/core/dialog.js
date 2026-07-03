@@ -26,7 +26,9 @@ const POLL_DIALOG_EXPR = `
         var btn2 = dlgBtns[j];
         if (!btn2.getClientRects().length) continue;
         var t2 = (btn2.textContent || '').trim();
-        if (/^(yes|ok|confirm)$/i.test(t2)) {
+        // Widened to also match TradingView's "Delete script?" confirmation
+        // dialog, whose confirm button reads "Delete" (observed live).
+        if (/^(yes|ok|confirm|delete|remove)$/i.test(t2)) {
           btn2.click();
           return { handled: true, action: 'confirm', button_text: t2 };
         }
