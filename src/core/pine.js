@@ -3,6 +3,7 @@
  * All functions accept plain options objects and return plain JS objects.
  * They throw on error (callers catch and format).
  */
+import https from 'node:https';
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, getClient as _getClient } from '../connection.js';
 import { pollForDialog } from './dialog.js';
 
@@ -13,6 +14,44 @@ function _resolve(deps) {
     getClient: deps?.getClient || _getClient,
     sleep: deps?.sleep || ((ms) => new Promise(r => setTimeout(r, ms))),
   };
+}
+
+/**
+ * POST a form body over HTTPS from Node and return { status, statusText, body }.
+ * Uses `agent: false` so the connection is not kept alive in a pool: it closes
+ * as soon as the response ends. Global `fetch` (undici) instead leaves an idle
+ * keep-alive socket behind, whose async handle crashes libuv on process teardown
+ * on Windows (`!(handle->flags & UV_HANDLE_CLOSING)`) — which broke the one-shot
+ * `tv pine check` CLI. A fresh, self-closing connection avoids that entirely.
+ */
+function httpsPostForm(urlString, formBody, headers) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(urlString);
+    const body = Buffer.from(formBody, 'utf-8');
+    const req = https.request(
+      {
+        hostname: url.hostname,
+        path: url.pathname + url.search,
+        method: 'POST',
+        headers: { ...headers, 'Content-Length': body.length },
+        agent: false,
+      },
+      (res) => {
+        const chunks = [];
+        res.on('data', (c) => chunks.push(c));
+        res.on('end', () => {
+          resolve({
+            status: res.statusCode,
+            statusText: res.statusMessage,
+            body: Buffer.concat(chunks).toString('utf-8'),
+          });
+        });
+      }
+    );
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
 }
 
 // ── Open-script tracking (guard rail against overwriting the wrong slot) ──
@@ -259,24 +298,21 @@ export async function check({ source }) {
   const formData = new URLSearchParams();
   formData.append('source', source);
 
-  const response = await fetch(
+  const response = await httpsPostForm(
     'https://pine-facade.tradingview.com/pine-facade/translate_light?user_name=Guest&pine_id=00000000-0000-0000-0000-000000000000',
+    formData.toString(),
     {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Referer': 'https://www.tradingview.com/',
-      },
-      body: formData,
+      'Accept': 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Referer': 'https://www.tradingview.com/',
     }
   );
 
-  if (!response.ok) {
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`TradingView API returned ${response.status}: ${response.statusText}`);
   }
 
-  const result = await response.json();
+  const result = JSON.parse(response.body);
   const errors = [];
   const warnings = [];
   const inner = result?.result;
@@ -460,6 +496,37 @@ async function fetchScriptList(evaluateAsync) {
       .catch(function(e) { return { scripts: null, error: e.message }; })
   `);
   return { scripts: data?.scripts ?? null, error: data?.error };
+}
+
+/**
+ * Resolves a saved script by name from the pine-facade list. Matching is
+ * case-insensitive: an exact match on name or title wins, otherwise the first
+ * substring match. Throws if the list can't be fetched or nothing matches.
+ * Pass `{ unique: true }` for destructive callers (e.g. deleteScript) so an
+ * ambiguous name throws instead of silently acting on the wrong slot; the
+ * default returns the first match (openScript's lenient behaviour).
+ */
+async function resolveScriptByName(name, evaluateAsync, { unique = false } = {}) {
+  const { scripts, error } = await fetchScriptList(evaluateAsync);
+  if (!scripts) {
+    throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
+  }
+  const target = name.toLowerCase();
+  let matches = scripts.filter(s =>
+    s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target
+  );
+  if (matches.length === 0) {
+    matches = scripts.filter(s =>
+      s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target)
+    );
+  }
+  if (matches.length === 0) {
+    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
+  }
+  if (unique && matches.length > 1) {
+    throw new Error(`"${name}" matches ${matches.length} scripts — use an exact name.`);
+  }
+  return matches[0];
 }
 
 /**
@@ -868,22 +935,7 @@ export async function openScript({ name, _deps }) {
   if (!editorReady) throw new Error('Could not open Pine Editor.');
 
   // Resolve the target script from the saved-script list before touching the UI.
-  const { scripts, error } = await fetchScriptList(d.evaluateAsync);
-  if (!scripts) throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
-
-  const target = name.toLowerCase();
-  let match = scripts.find(s =>
-    s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target
-  );
-  if (!match) {
-    match = scripts.find(s =>
-      s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target)
-    );
-  }
-  if (!match) {
-    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
-  }
-
+  const match = await resolveScriptByName(name, d.evaluateAsync);
   const scriptId = match.id;
   const scriptName = match.name;
 
@@ -1005,22 +1057,7 @@ export async function deleteScript({ name, _deps } = {}) {
     throw new Error('Could not open Pine Editor.');
   }
 
-  const { scripts, error } = await fetchScriptList(d.evaluateAsync);
-  if (!scripts) {
-    throw new Error(`Could not fetch script list: ${error ?? 'unknown error'}`);
-  }
-  const target = name.toLowerCase();
-  let matches = scripts.filter(s => s.name.toLowerCase() === target || (s.title || '').toLowerCase() === target);
-  if (matches.length === 0) {
-    matches = scripts.filter(s => s.name.toLowerCase().includes(target) || (s.title || '').toLowerCase().includes(target));
-  }
-  if (matches.length === 0) {
-    throw new Error(`Script "${name}" not found. Use pine_list_scripts to see available scripts.`);
-  }
-  if (matches.length > 1) {
-    throw new Error(`"${name}" matches ${matches.length} scripts — use an exact name.`);
-  }
-  const match = matches[0];
+  const match = await resolveScriptByName(name, d.evaluateAsync, { unique: true });
 
   // Open Script dialog: title button -> "Open script" -> search.
   const menu = await d.evaluate(`
