@@ -1,8 +1,7 @@
 /**
  * Core UI automation logic.
  */
-import { evaluate, evaluateAsync, getClient } from '../connection.js';
-import { pollForDialog } from './dialog.js';
+import { evaluate, evaluateAsync, getClient, navigate } from '../connection.js';
 
 export async function click({ by, value }) {
   const escaped = JSON.stringify(value);
@@ -118,35 +117,91 @@ export async function layoutList() {
   return { success: true, layout_count: layouts?.layouts?.length || 0, source: layouts?.source, layouts: layouts?.layouts || [], error: layouts?.error };
 }
 
-export async function layoutSwitch({ name, _deps } = {}) {
-  const _evaluate = _deps?.evaluate || evaluate;
-  const _evaluateAsync = _deps?.evaluateAsync || evaluateAsync;
-  const _sleep = _deps?.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
-  const escaped = JSON.stringify(name);
+const TV_CHART_BASE = 'https://www.tradingview.com/chart/';
+
+/**
+ * Resolve a layout reference (URL slug, numeric id, or name) to its saved-chart
+ * entry. Matching order: exact url slug, exact numeric id, exact name
+ * (case-insensitive), then name substring. Returns { url, id, name } or null.
+ */
+async function resolveSavedChart(target, _evaluateAsync) {
+  const escaped = JSON.stringify(String(target));
   const result = await _evaluateAsync(`
     new Promise(function(resolve) {
       try {
         var target = ${escaped};
-        if (/^\\d+$/.test(target)) { window.TradingViewApi.loadChartFromServer(target); resolve({success: true, method: 'loadChartFromServer', id: target, source: 'internal_api'}); return; }
         window.TradingViewApi.getSavedCharts(function(charts) {
-          if (!charts || !Array.isArray(charts)) { resolve({success: false, error: 'getSavedCharts returned no data', source: 'internal_api'}); return; }
-          var match = null;
-          for (var i = 0; i < charts.length; i++) { var cname = charts[i].name || charts[i].title || ''; if (cname === target || cname.toLowerCase() === target.toLowerCase()) { match = charts[i]; break; } }
-          if (!match) { for (var j = 0; j < charts.length; j++) { var cn = (charts[j].name || charts[j].title || '').toLowerCase(); if (cn.indexOf(target.toLowerCase()) !== -1) { match = charts[j]; break; } } }
-          if (!match) { resolve({success: false, error: 'Layout "' + target + '" not found.', source: 'internal_api'}); return; }
-          var chartId = match.id || match.chartId;
-          window.TradingViewApi.loadChartFromServer(chartId);
-          resolve({success: true, method: 'loadChartFromServer', id: chartId, name: match.name || match.title, source: 'internal_api'});
+          if (!charts || !Array.isArray(charts)) { resolve({ __error: 'getSavedCharts returned no data' }); return; }
+          function pick(c) { return { url: c.url || c.image_url || null, id: (c.id != null ? String(c.id) : null), name: c.name || c.title || 'Untitled' }; }
+          var lt = target.toLowerCase();
+          var i;
+          for (i = 0; i < charts.length; i++) { if (String(charts[i].url || '') === target) { resolve(pick(charts[i])); return; } }
+          for (i = 0; i < charts.length; i++) { if (String(charts[i].id != null ? charts[i].id : '') === target) { resolve(pick(charts[i])); return; } }
+          for (i = 0; i < charts.length; i++) { var n = (charts[i].name || charts[i].title || ''); if (n === target || n.toLowerCase() === lt) { resolve(pick(charts[i])); return; } }
+          for (i = 0; i < charts.length; i++) { var n2 = (charts[i].name || charts[i].title || '').toLowerCase(); if (n2.indexOf(lt) !== -1) { resolve(pick(charts[i])); return; } }
+          resolve(null);
         });
-        setTimeout(function() { resolve({success: false, error: 'getSavedCharts timed out', source: 'internal_api'}); }, 5000);
-      } catch(e) { resolve({success: false, error: e.message, source: 'internal_api'}); }
+        setTimeout(function() { resolve({ __error: 'getSavedCharts timed out' }); }, 5000);
+      } catch (e) { resolve({ __error: e.message }); }
     })
   `);
-  if (!result?.success) throw new Error(result?.error || 'Unknown error switching layout');
+  if (result && result.__error) { throw new Error(result.__error); }
+  return result;
+}
 
-  const _d = { evaluate: _evaluate, sleep: _sleep };
-  const dialog = await pollForDialog(_d);
-  return { success: true, layout: result.name || name, layout_id: result.id, source: result.source, action: 'switched', unsaved_dialog_dismissed: dialog.handled };
+/**
+ * Read the layout name currently loaded in the active chart, or null when the
+ * TradingView API is not ready (e.g. mid-reload).
+ */
+async function readCurrentLayoutName(_evaluate) {
+  return _evaluate(`(function() { try { var a = window.TradingViewApi; return (a && typeof a.layoutName === 'function') ? String(a.layoutName()) : null; } catch (e) { return null; } })()`);
+}
+
+/**
+ * Poll until the active chart reports the expected layout name, tolerating the
+ * transient nulls/errors that occur while the page reloads after navigation.
+ * Returns true once the layout matches, false if the timeout elapses first.
+ */
+async function waitForLayoutName(expected, { evaluate: _evaluate, sleep: _sleep }, { maxMs = 20000, interval = 500 } = {}) {
+  const want = String(expected).toLowerCase();
+  const maxTicks = Math.ceil(maxMs / interval);
+  for (let i = 0; i < maxTicks; i++) {
+    let current = null;
+    try { current = await readCurrentLayoutName(_evaluate); }
+    catch { current = null; }
+    if (current && String(current).toLowerCase() === want) { return true; }
+    if (i < maxTicks - 1) { await _sleep(interval); }
+  }
+  return false;
+}
+
+export async function layoutSwitch({ name, _deps } = {}) {
+  const _evaluate = _deps?.evaluate || evaluate;
+  const _evaluateAsync = _deps?.evaluateAsync || evaluateAsync;
+  const _sleep = _deps?.sleep || ((ms) => new Promise(r => setTimeout(r, ms)));
+  const _navigate = _deps?.navigate || navigate;
+
+  const match = await resolveSavedChart(name, _evaluateAsync);
+  if (!match) { throw new Error(`Layout "${name}" not found.`); }
+  if (!match.url) { throw new Error(`Layout "${match.name}" has no URL slug and cannot be opened.`); }
+
+  const before = await readCurrentLayoutName(_evaluate);
+
+  // The active layout is encoded in the page URL, so navigating to the layout's
+  // slug is the only reliable switch on TradingView Desktop — the in-page
+  // loadChartFromServer/loadLayoutFromServerByLayoutId APIs resolve but never
+  // change the active layout here. Navigation auto-accepts the "unsaved changes"
+  // beforeunload prompt, discarding local edits.
+  await _navigate(`${TV_CHART_BASE}${match.url}/`);
+
+  // Verify the switch actually landed. Reporting success without this readback
+  // is the original bug: loadChartFromServer "succeeded" while nothing changed.
+  const verified = await waitForLayoutName(match.name, { evaluate: _evaluate, sleep: _sleep });
+  if (!verified) {
+    throw new Error(`Layout "${match.name}" did not load after navigation (still "${before || 'unknown'}").`);
+  }
+
+  return { success: true, layout: match.name, layout_id: match.url, source: 'navigation', action: 'switched', verified: true };
 }
 
 export async function keyboard({ key, modifiers }) {

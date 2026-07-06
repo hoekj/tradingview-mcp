@@ -34,7 +34,9 @@ const KNOWN_PATHS = {
   mainSeriesBars: 'window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model().mainSeries().bars()',
   // Phase 1: Strategy data — model().dataSources() → find strategy → .performance().value(), .ordersData(), .reportData()
   strategyStudy: 'chart._chartWidget.model().model().dataSources()',
-  // Phase 2: Layouts — getSavedCharts(cb), loadChartFromServer(id)
+  // Phase 2: Layouts — getSavedCharts(cb) lists saved layouts (each has a `url`
+  // slug); switching is done by navigating to /chart/<slug>/ (the in-page
+  // loadChartFromServer/loadLayoutFromServerByLayoutId loaders are a no-op on Desktop).
   layoutManager: 'window.TradingViewApi.getSavedCharts',
   // Phase 5: Symbol search — searchSymbols(query) returns Promise
   symbolSearchApi: 'window.TradingViewApi.searchSymbols',
@@ -153,6 +155,24 @@ export async function evaluate(expression, opts = {}) {
 
 export async function evaluateAsync(expression) {
   return evaluate(expression, { awaitPromise: true });
+}
+
+/**
+ * Navigate the chart tab to a new URL via CDP. Auto-accepts any beforeunload
+ * ("unsaved changes") prompt so the navigation proceeds and local chart edits
+ * are discarded — callers that need to keep changes must save first.
+ * The active TradingView layout is encoded in the page URL, so this is the
+ * reliable way to switch layouts (the in-page loader APIs are a no-op on Desktop).
+ */
+export async function navigate(url) {
+  const c = await getClient();
+  const accept = () => { c.Page.handleJavaScriptDialog({ accept: true }).catch(() => {}); };
+  c.on('Page.javascriptDialogOpening', accept);
+  try {
+    await withTimeout(c.Page.navigate({ url }), CONNECT_TIMEOUT_MS, 'CDP Page.navigate');
+  } finally {
+    c.removeListener('Page.javascriptDialogOpening', accept);
+  }
 }
 
 export async function disconnect() {
