@@ -15,6 +15,7 @@ import { registerDataTools } from '../src/tools/data.js';
 import { registerDrawingTools } from '../src/tools/drawing.js';
 import { registerPineTools } from '../src/tools/pine.js';
 import { registerWatchlistTools } from '../src/tools/watchlist.js';
+import { registerUiTools } from '../src/tools/ui.js';
 
 // Build a fake MCP server that just captures each tool's handler function,
 // exactly the way the real server registration works (server.tool(name, desc, schema, handler)).
@@ -27,6 +28,7 @@ function buildHandlers() {
   registerDrawingTools(server);
   registerPineTools(server);
   registerWatchlistTools(server);
+  registerUiTools(server);
   return handlers;
 }
 
@@ -145,5 +147,100 @@ describe('MCP tool layer (live e2e)', () => {
     // Confirm the chart is left exactly as we found it (empty).
     const finalList = await call(handlers, 'draw_list');
     assert.equal(finalList.data.count, 0, 'chart has no leftover drawings after cleanup');
+  });
+});
+
+// Regression coverage for the layout_switch defect: the tool used to report
+// success:true from a fire-and-forget loadChartFromServer that never actually
+// changed the active layout. These tests drive the real handler and then read
+// the LIVE layout back independently, so a switch that silently no-ops fails.
+describe('layout_switch (live e2e)', () => {
+  const handlers = buildHandlers();
+  let original = null;
+
+  // Read the active layout name + unsaved-changes flag straight from the page.
+  async function readLayout() {
+    const { data } = await call(handlers, 'ui_evaluate', {
+      expression:
+        `(function(){try{var a=window.TradingViewApi;` +
+        `var ss=a.getSaveChartService?a.getSaveChartService():a._saveChartService;` +
+        `return {name:String(a.layoutName()),dirty:ss.hasChanges()};}` +
+        `catch(e){return {err:e.message};}})()`,
+    });
+    return data.result || {};
+  }
+
+  after(async () => {
+    // Best-effort: return to whatever layout we started on.
+    if (original && original.name) {
+      try { await call(handlers, 'layout_switch', { name: original.name }); } catch { /* ignore */ }
+    }
+    await teardown();
+  });
+
+  it('switches layout and verifies the active layout actually changed', { timeout: 120000 }, async (t) => {
+    const list = await call(handlers, 'layout_list');
+    const layouts = list.data.layouts || [];
+    if (layouts.length < 2) {
+      t.skip('need >= 2 saved layouts to exercise a switch');
+      return;
+    }
+
+    const start = await readLayout();
+    original = original || start;
+    const target = layouts.find((l) => l.name && l.name.toLowerCase() !== String(start.name).toLowerCase());
+    assert.ok(target, 'a layout different from the current one exists');
+
+    const res = await call(handlers, 'layout_switch', { name: target.name });
+    assert.equal(res.isError, false);
+    assert.equal(res.data.success, true);
+    assert.equal(res.data.verified, true, 'tool claims the switch was verified');
+
+    // Independent readback — the assertion that fails against the old code.
+    const after = await readLayout();
+    assert.equal(
+      String(after.name).toLowerCase(),
+      String(target.name).toLowerCase(),
+      'active layout reflects the requested switch'
+    );
+  });
+
+  it('switches away from a DIRTY layout, discarding the unsaved changes', { timeout: 120000 }, async (t) => {
+    const list = await call(handlers, 'layout_list');
+    const layouts = list.data.layouts || [];
+    if (layouts.length < 2) {
+      t.skip('need >= 2 saved layouts to exercise a switch');
+      return;
+    }
+
+    const start = await readLayout();
+    original = original || start;
+
+    // Dirty the current layout by changing its symbol without saving.
+    const dirtied = await call(handlers, 'ui_evaluate', {
+      expression:
+        `(function(){var c=window.TradingViewApi.activeChart();` +
+        `c.setSymbol(c.symbol()==='NASDAQ:AAPL'?'NASDAQ:MSFT':'NASDAQ:AAPL');` +
+        `var a=window.TradingViewApi;var ss=a.getSaveChartService?a.getSaveChartService():a._saveChartService;` +
+        `return {dirty:ss.hasChanges(),name:String(a.layoutName())};})()`,
+    });
+    assert.equal(dirtied.data.result.dirty, true, 'chart is dirty before switching');
+
+    const current = String(dirtied.data.result.name).toLowerCase();
+    const target = layouts.find((l) => l.name && l.name.toLowerCase() !== current);
+    assert.ok(target, 'a layout different from the current one exists');
+
+    const res = await call(handlers, 'layout_switch', { name: target.name });
+    assert.equal(res.isError, false, JSON.stringify(res.data));
+    assert.equal(res.data.success, true);
+    assert.equal(res.data.verified, true);
+
+    const after = await readLayout();
+    assert.equal(
+      String(after.name).toLowerCase(),
+      String(target.name).toLowerCase(),
+      'switched to the target layout despite pending changes'
+    );
+    assert.equal(after.dirty, false, 'the unsaved changes were discarded by the switch');
   });
 });
