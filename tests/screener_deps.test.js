@@ -65,7 +65,7 @@ describe('deriveComplete()', () => {
 
 // Build injected deps modelling the live screener panel. `state.open` is what
 // the page reports; click() flips it the way the real button does.
-function makePanelDeps({ open = false, closable = true } = {}) {
+function makePanelDeps({ open = false, closable = true, staysOpen = false } = {}) {
   const state = { open, clicks: [], closeClicked: false };
   const deps = {
     evaluate: async (expr) => {
@@ -83,7 +83,9 @@ function makePanelDeps({ open = false, closable = true } = {}) {
         if (!state.open) { return { ok: true, note: 'already closed' }; }
         if (!closable) { return { ok: false, reason: 'close_button_not_found' }; }
         state.closeClicked = true;
-        state.open = false;
+        if (!staysOpen) {
+          state.open = false;
+        }
         return { ok: true, clicked: true };
       }
       return null;
@@ -140,6 +142,11 @@ describe('closeScreenerPanel()', () => {
   it('throws when the close button cannot be located', async () => {
     const { deps } = makePanelDeps({ open: true, closable: false });
     await assert.rejects(() => closeScreenerPanel(deps), /could not close/i);
+  });
+
+  it('throws when the panel is still present after the close click', async () => {
+    const { deps } = makePanelDeps({ open: true, staysOpen: true });
+    await assert.rejects(() => closeScreenerPanel(deps), /still open/i);
   });
 });
 
