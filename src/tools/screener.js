@@ -14,7 +14,7 @@ export function registerScreenerTools(server) {
   }
 
   server.tool('screener_get_rows',
-    'Make the named saved screen the active screener and return its rows as EXCH:TICKER[]. Omit screenName to scrape the currently active screen. Fails loudly if the screen is missing or the name is ambiguous.',
+    'Make the named saved screen the active screener and return its rows as EXCH:TICKER[]. Omit screenName to scrape the currently active screen. Fails loudly if the screen is missing or the name is ambiguous. If `stale:true` is set, the row set was never confirmed to have finished rendering — ignore `complete` when it is set.',
     {
       screenName: z.string().optional().describe('Exact saved screen name, e.g. "Pre-market most active". Omit to use the active screen.'),
     },

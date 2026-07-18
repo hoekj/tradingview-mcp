@@ -103,6 +103,9 @@ describe('screener core (live e2e)', () => {
     assert.ok(Array.isArray(res.available), 'available is a list');
     assert.ok(res.available.length > 0, 'available is non-empty');
     assert.ok(res.available.some(r => r.name === SCREEN), 'the real screen is listed');
+    // Verify that section tagging is working: if both sections were tagged identically,
+    // the dedup key would collapse a genuine cross-section duplicate, breaking ambiguity detection.
+    assert.ok(res.available.some(r => r.section === 'POPULAR SCREENS'), 'at least one entry is tagged as POPULAR SCREENS');
   });
 
   it('restores panel state — closed before, closed after', async () => {
