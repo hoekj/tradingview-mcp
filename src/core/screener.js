@@ -335,8 +335,8 @@ export async function scrapeRows(_deps) {
 }
 
 /**
- * Poll `scrapeRows` until two consecutive reads agree on both row count and
- * scrollHeight (a "settled" read), or the budget expires.
+ * Poll `scrapeRows` until two consecutive NON-EMPTY reads agree on row count,
+ * scrollHeight, and clientHeight (a "settled" read), or the budget expires.
  *
  * The results table remounts whenever the panel opens or the active screen
  * changes. Immediately afterwards it can report a transient state — rows
@@ -344,24 +344,39 @@ export async function scrapeRows(_deps) {
  * scrollHeight/clientHeight pair (observed live: transient 1070/620 before
  * settling to 376/376) — so a single non-empty read is not proof rendering
  * has finished; it only proves rendering has STARTED. Requiring two
- * consecutive matching reads catches that transition. The returned reading
- * always comes from a single `scrapeRows` observation — rows and scroll
- * measurements are never merged across polls, so `complete` is never derived
- * from measurements that never coexisted with the returned rows.
+ * consecutive matching reads catches that transition, and comparing
+ * `clientHeight` too (not just `scrollHeight`) catches a pair that agrees on
+ * `rows.length` and `scrollHeight` while `clientHeight` is still mid-transition
+ * (e.g. 1070/620 then 1070/376 — same rows, same scrollHeight, but
+ * `clientHeight` has not finished changing, so `deriveComplete` would be
+ * evaluated against a measurement pair that never actually coexisted as a
+ * finished render). The returned reading always comes from a single
+ * `scrapeRows` observation — rows and scroll measurements are never merged
+ * across polls, so `complete` is never derived from measurements that never
+ * coexisted with the returned rows.
  *
  * `scrapeRows` can also throw while the results table has not yet mounted —
  * the more likely state immediately after a remount, and earlier than the
  * "table present but empty" case. A throw is treated as a non-ready tick and
  * retried, not raised, unless every tick in the whole budget throws (a
- * genuinely absent table must still surface that error).
+ * genuinely absent table must still surface that error). Because a throw means
+ * the next successful read cannot be trusted to be adjacent to whatever came
+ * before the throw, `prev` is reset to null on the throw path so an
+ * observation from before the throw can never settle against one from after it.
  *
- * A screen that genuinely matches zero rows is a legitimate steady state for
- * this tool (e.g. a pre-market screen outside pre-market hours) — it is NOT
- * safe to assume otherwise. When two consecutive empty reads agree, that is a
- * settled (non-stale) empty result. Only when the budget expires without ever
- * settling is the last successful read returned with `settled: false`, so the
- * caller can flag the result as possibly incomplete instead of silently
- * treating it as a proven answer.
+ * A settled read may only short-circuit the poll when it is NON-EMPTY. Two
+ * consecutive EMPTY reads agree trivially (0 === 0, and an empty table's
+ * scrollHeight/clientHeight equal each other) — that trivial agreement is
+ * exactly the transient "table mounted, rows not painted yet" state this poll
+ * exists to wait out, and returning on it immediately re-introduces the race
+ * the settle requirement was added to close. So empty observations never end
+ * the loop early; the poll keeps ticking for the full budget hoping real rows
+ * still arrive. If the budget expires and the reads are still empty, the last
+ * observation is returned with `settled: false`, so the caller (`get()`) marks
+ * the result `stale: true`. We genuinely cannot distinguish "this screen
+ * matches nothing" from "the table never finished rendering" from in here —
+ * saying so honestly, at the cost of a full-budget wait on a truly empty
+ * screen, beats a confident wrong answer.
  */
 async function waitForResultsReady(d, { maxMs = 3000, interval = 100 } = {}) {
   const ticks = Math.ceil(maxMs / interval);
@@ -376,6 +391,7 @@ async function waitForResultsReady(d, { maxMs = 3000, interval = 100 } = {}) {
       current = await scrapeRows(d);
     } catch (err) {
       lastErr = err;
+      prev = null;
       if (i < ticks - 1) {
         await d.sleep(interval);
       }
@@ -383,7 +399,11 @@ async function waitForResultsReady(d, { maxMs = 3000, interval = 100 } = {}) {
     }
     sawSuccess = true;
     last = current;
-    if (prev && prev.rows.length === current.rows.length && prev.scrollHeight === current.scrollHeight) {
+    const agrees = prev
+      && prev.rows.length === current.rows.length
+      && prev.scrollHeight === current.scrollHeight
+      && prev.clientHeight === current.clientHeight;
+    if (agrees && current.rows.length > 0) {
       return { ...last, settled: true };
     }
     prev = current;

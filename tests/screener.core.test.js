@@ -139,10 +139,21 @@ describe('screener core (live e2e)', () => {
     // module, and `assert.equal(typeof res.complete, 'boolean')` elsewhere in
     // this file is satisfied even by a hardcoded `true`, so this is the only
     // test that actually proves complete:false is reachable.
+    //
+    // Note: pickScreenMatch() errors on ambiguity rather than guessing, so a
+    // workspace that also has a MY SCREENS entry literally named "All stocks"
+    // would make screener.get() below fail with an "ambiguous" error — and
+    // this test would fail for a reason that has nothing to do with the code
+    // actually under test here (overflow/completeness detection).
     const res = await screener.get({ screenName: 'All stocks' });
     assert.equal(res.success, true);
     assert.equal(res.complete, false, 'All stocks has enough rows to overflow the results scroller');
-    assert.ok(res.count >= 100, `expected at least 100 rows, got ${res.count}`);
+    // TradingView caps rendered rows at exactly 100, so asserting `count >= 100`
+    // really only asserts "the paging cap was reached" rather than testing
+    // overflow detection itself. Asserting count > 0 together with
+    // complete === false exercises overflow detection directly and survives a
+    // future change to the cap.
+    assert.ok(res.count > 0, `expected at least some rows, got ${res.count}`);
 
     // Restore to the suite's screen before the next test runs.
     const restored = await screener.get({ screenName: SCREEN });

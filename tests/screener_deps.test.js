@@ -555,15 +555,49 @@ describe('get() — results poll (waitForResultsReady)', () => {
     assert.equal(res.stale, true, 'the caller can tell this result was never proven settled');
   });
 
-  it('settles cleanly on a genuinely stable zero-row screen, with no stale flag', async () => {
+  it('exhausts the budget on a persistently empty screen and reports stale:true', async () => {
+    // Two (or more) consecutive EMPTY reads agree trivially (0 === 0, and an
+    // empty table's scrollHeight/clientHeight equal each other) — that trivial
+    // agreement is exactly the transient "table mounted, rows not painted yet"
+    // state the settle requirement exists to wait out. A settled read may only
+    // short-circuit the poll when it is NON-EMPTY, so a screen that never
+    // produces rows correctly costs the full poll budget and comes back
+    // flagged stale, since "matches nothing" and "never finished rendering"
+    // are indistinguishable from in here.
     const { deps } = makeFullDeps({
       startOpen: true,
       active: 'Cam Prefilter',
       scrapeReads: [{ rows: [], scrollHeight: 376, clientHeight: 376 }],
     });
     const res = await get({ _deps: deps });
-    assert.equal(res.success, true);
+    assert.equal(res.success, true, 'exhaustion is not an error');
     assert.equal(res.count, 0);
-    assert.equal(res.stale, undefined, 'a stable empty read is a proven zero-row result, not exhaustion');
+    assert.equal(res.stale, true, 'an empty result can never be confirmed settled, so it is always flagged stale');
+  });
+
+  it('does NOT settle on two agreeing empty reads even when real rows arrive later (regression)', async () => {
+    // Reproduces the Critical: right after a panel-open or screen-switch, the
+    // table can be mounted-but-empty for a couple of ticks before real rows
+    // paint. The first two observations here are EMPTY and agree with each
+    // other on rows.length/scrollHeight/clientHeight — under the old "any two
+    // agreeing reads settle" rule that agreement alone would end the poll
+    // immediately with rows: [] and complete: true, silently discarding the
+    // real rows that show up two ticks later. get() must keep polling past
+    // the empty agreement and return the real, later-settled rows instead.
+    const { deps } = makeFullDeps({
+      startOpen: true,
+      active: 'Cam Prefilter',
+      scrapeReads: [
+        { rows: [], scrollHeight: 200, clientHeight: 200 },
+        { rows: [], scrollHeight: 200, clientHeight: 200 },
+        { rows: ['NYSE:AAA'], scrollHeight: 300, clientHeight: 300 },
+        { rows: ['NYSE:AAA'], scrollHeight: 300, clientHeight: 300 },
+      ],
+    });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, true);
+    assert.deepEqual(res.rows, ['NYSE:AAA'], 'the real rows are returned, not an empty settled result');
+    assert.equal(res.count, 1);
+    assert.equal(res.stale, undefined, 'the real rows settled cleanly, so this is not stale');
   });
 });
