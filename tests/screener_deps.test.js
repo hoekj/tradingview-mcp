@@ -260,6 +260,8 @@ function makeFullDeps({
   keys = KEYS,
   overflow = false,
   selectLands = true,
+  scrapeFails = false,
+  closeFails = false,
 } = {}) {
   const state = {
     open: startOpen, active, dialogOpen: false,
@@ -281,6 +283,7 @@ function makeFullDeps({
         return { ok: true, rows: q ? rows.filter(r => r.name.toLowerCase().includes(q)) : rows };
       }
       if (src.includes('selectable-rows-table-body')) {
+        if (scrapeFails) { return { ok: false, reason: 'no_results_table' }; }
         return {
           ok: true, rows: keys,
           scrollHeight: overflow ? 900 : 378,
@@ -290,6 +293,7 @@ function makeFullDeps({
       if (src.includes('screenerContainer') && src.trim().startsWith('!')) { return !state.open; }
       if (src.includes('aria-label="Close"')) {
         if (!state.open) { return { ok: true, note: 'already closed' }; }
+        if (closeFails) { return { ok: false, reason: 'close_button_not_found' }; }
         state.open = false; state.closed = true;
         return { ok: true, clicked: true };
       }
@@ -360,6 +364,11 @@ describe('get()', () => {
     assert.equal(res.success, false);
     assert.match(res.error, /not found/i);
     assert.ok(Array.isArray(res.available), 'available is a list');
+    assert.ok(res.available.length > 0, 'available is not empty');
+    assert.ok(
+      res.available.some((r) => r.name === 'Pre-market most active'),
+      'available contains the known screens, read before the dialog was narrowed by typing'
+    );
   });
 
   it('refuses an ambiguous name rather than guessing', async () => {
@@ -414,5 +423,34 @@ describe('get()', () => {
     assert.equal(res.success, false);
     assert.equal(state.closed, true, 'panel closed despite the failure');
     assert.ok(state.escapes > 0, 'the dialog was dismissed');
+  });
+
+  it('converts a thrown helper error into success:false and still restores the panel', async () => {
+    // scrapeRows throws when the results table cannot be read; the try/catch in
+    // get() must convert that thrown error into a normal {success:false} result.
+    const { deps, state } = makeFullDeps({ startOpen: false, active: 'Pre-market most active', scrapeFails: true });
+    const res = await get({ screenName: 'Pre-market most active', _deps: deps });
+    assert.equal(res.success, false, 'the throw was caught, not propagated');
+    assert.match(res.error, /could not read the screener results table/i);
+    assert.equal(state.closed, true, 'the finally block still restored the panel');
+  });
+
+  it('never lets a cleanup failure mask the real result', async () => {
+    // closeScreenerPanel throws when the close button cannot be found; the
+    // finally block's try/catch(_) must swallow that and preserve the real
+    // outcome that was already decided.
+    const { deps, state } = makeFullDeps({ startOpen: false, active: 'Cam Prefilter', closeFails: true });
+    const res = await get({ screenName: 'Pre-market most active', _deps: deps });
+    assert.equal(res.success, true, 'the real success is returned, not a cleanup error');
+    assert.equal(res.screen, 'Pre-market most active');
+    assert.equal(state.closed, false, 'the close attempt failed as configured');
+  });
+
+  it('never lets a cleanup failure mask a real error', async () => {
+    const { deps, state } = makeFullDeps({ startOpen: false, active: 'Cam Prefilter', closeFails: true });
+    const res = await get({ screenName: '__no_such_screen__', _deps: deps });
+    assert.equal(res.success, false, 'the real not_found error is returned, not a cleanup error');
+    assert.match(res.error, /not found/i);
+    assert.equal(state.closed, false, 'the close attempt failed as configured');
   });
 });

@@ -377,8 +377,9 @@ export async function get({ screenName, _deps } = {}) {
 
     if (target !== null && !alreadyActive) {
       await openScreenDialog(d);
-      await searchDialog(target, d);
 
+      // Read the UNFILTERED rows first, before typing narrows the dialog —
+      // otherwise a not_found response would report zero available screens.
       const rows = await readDialogRows(d);
       const picked = pickScreenMatch(rows, target);
 
@@ -398,6 +399,9 @@ export async function get({ screenName, _deps } = {}) {
           matches: picked.matches,
         };
       }
+
+      // Now narrow the list so the keyboard highlight lands on the right row.
+      await searchDialog(target, d);
 
       // The highlight must move from the search box into the list first —
       // Enter on its own does not select.
