@@ -335,6 +335,34 @@ export async function scrapeRows(_deps) {
 }
 
 /**
+ * Poll `scrapeRows` until it returns a non-empty row list or the budget
+ * expires, then return the last read.
+ *
+ * The results table remounts whenever the panel opens or the active screen
+ * changes, and for a brief window afterwards it reports zero rows alongside
+ * stale scroll measurements (observed live: transient scrollHeight/clientHeight
+ * values that do not match the settled DOM). A screen with genuinely zero
+ * matches is not a realistic steady state for the screens this tool targets,
+ * so a bounded retry resolves the render race without masking a real failure
+ * — after the budget expires the last (possibly empty) read is still returned
+ * rather than raising an error.
+ */
+async function waitForResultsReady(d, { maxMs = 3000, interval = 100 } = {}) {
+  const ticks = Math.ceil(maxMs / interval);
+  let last = { rows: [], scrollHeight: null, clientHeight: null };
+  for (let i = 0; i < ticks; i++) {
+    last = await scrapeRows(d);
+    if (last.rows.length > 0) {
+      return last;
+    }
+    if (i < ticks - 1) {
+      await d.sleep(interval);
+    }
+  }
+  return last;
+}
+
+/**
  * Dismiss the screen dialog or title menu with Escape so a failed call never
  * strands an overlay open. Best-effort: a cleanup failure must never overwrite
  * the error that caused it.
@@ -427,7 +455,7 @@ export async function get({ screenName, _deps } = {}) {
     }
 
     const screen = await getActiveScreenName(d);
-    const scraped = await scrapeRows(d);
+    const scraped = await waitForResultsReady(d);
     const result = {
       success: true,
       screen,
