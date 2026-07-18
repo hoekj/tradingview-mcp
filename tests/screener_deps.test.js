@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickScreenMatch, deriveComplete } from '../src/core/screener.js';
+import { pickScreenMatch, deriveComplete, ensureScreenerOpen, closeScreenerPanel, getActiveScreenName } from '../src/core/screener.js';
 
 const ROWS = [
   { name: 'Pre-market most active', section: 'MY SCREENS' },
@@ -60,5 +60,97 @@ describe('deriveComplete()', () => {
   it('is not complete when the measurement is unavailable', () => {
     // Never claim completeness we could not observe.
     assert.equal(deriveComplete({ scrollHeight: null, clientHeight: null }), false);
+  });
+});
+
+// Build injected deps modelling the live screener panel. `state.open` is what
+// the page reports; click() flips it the way the real button does.
+function makePanelDeps({ open = false, closable = true } = {}) {
+  const state = { open, clicks: [], closeClicked: false };
+  const deps = {
+    evaluate: async (expr) => {
+      const src = String(expr);
+      if (src.includes('screener-topbar-screen-title') && src.includes('!!')) {
+        return state.open;
+      }
+      if (src.includes('screener-topbar-screen-title')) {
+        return state.open ? 'Pre-market most active' : null;
+      }
+      if (src.includes('screenerContainer') && src.startsWith('!')) {
+        return !state.open;
+      }
+      if (src.includes('close_button_not_found') || src.includes('aria-label="Close"')) {
+        if (!state.open) { return { ok: true, note: 'already closed' }; }
+        if (!closable) { return { ok: false, reason: 'close_button_not_found' }; }
+        state.closeClicked = true;
+        state.open = false;
+        return { ok: true, clicked: true };
+      }
+      return null;
+    },
+    click: async ({ by, value }) => {
+      state.clicks.push(`${by}:${value}`);
+      if (value === 'screener-dialog-button') { state.open = true; }
+      return { success: true };
+    },
+    keyboard: async () => ({ success: true }),
+    sleep: async () => {},
+  };
+  return { deps, state };
+}
+
+describe('ensureScreenerOpen()', () => {
+  it('opens the panel and reports that it did so', async () => {
+    const { deps, state } = makePanelDeps({ open: false });
+    const res = await ensureScreenerOpen(deps);
+    assert.equal(res.opened, true, 'reports it opened the panel');
+    assert.deepEqual(state.clicks, ['data-name:screener-dialog-button']);
+  });
+
+  it('does not click when the panel is already open', async () => {
+    const { deps, state } = makePanelDeps({ open: true });
+    const res = await ensureScreenerOpen(deps);
+    assert.equal(res.opened, false, 'reports it did not open the panel');
+    assert.deepEqual(state.clicks, [], 'no click issued');
+  });
+
+  it('throws a DOM-change error when the panel never appears', async () => {
+    const { deps } = makePanelDeps({ open: false });
+    deps.click = async () => ({ success: true }); // click lands but nothing mounts
+    await assert.rejects(() => ensureScreenerOpen(deps), /did not open/i);
+  });
+});
+
+describe('closeScreenerPanel()', () => {
+  it('closes an open panel', async () => {
+    const { deps, state } = makePanelDeps({ open: true });
+    const res = await closeScreenerPanel(deps);
+    assert.equal(res, true);
+    assert.equal(state.open, false, 'panel is closed');
+    assert.equal(state.closeClicked, true, 'the close button was used');
+  });
+
+  it('is a no-op when the panel is already closed', async () => {
+    const { deps, state } = makePanelDeps({ open: false });
+    const res = await closeScreenerPanel(deps);
+    assert.equal(res, true);
+    assert.equal(state.closeClicked, false, 'nothing was clicked');
+  });
+
+  it('throws when the close button cannot be located', async () => {
+    const { deps } = makePanelDeps({ open: true, closable: false });
+    await assert.rejects(() => closeScreenerPanel(deps), /could not close/i);
+  });
+});
+
+describe('getActiveScreenName()', () => {
+  it('reads the active screen title', async () => {
+    const { deps } = makePanelDeps({ open: true });
+    assert.equal(await getActiveScreenName(deps), 'Pre-market most active');
+  });
+
+  it('returns null when the screener is closed', async () => {
+    const { deps } = makePanelDeps({ open: false });
+    assert.equal(await getActiveScreenName(deps), null);
   });
 });
