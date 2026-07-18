@@ -6,6 +6,10 @@ import { disconnect } from '../src/connection.js';
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const SCREEN = 'Pre-market most active';
 
+// Note: This suite is time-of-day dependent. The fixture screen "Pre-market most active"
+// can legitimately return zero rows outside pre-market hours, which will cause
+// non-empty assertions to fail and each call to consume the full ~3s poll budget.
+
 describe('screener core (live e2e)', () => {
   let startingScreen = null;
   let startedOpen = false;

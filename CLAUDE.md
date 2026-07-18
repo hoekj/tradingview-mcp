@@ -81,6 +81,15 @@ Use `study_filter` parameter to target a specific indicator by name substring (e
 - `watchlist_sort` → reorder to match an exact permutation of the current symbols
 - `watchlist_select` → activate a saved watchlist by name (e.g. "Today"); on failure returns the available list names
 
+### "What's in my screener?"
+- `screener_get_rows` → make a saved screen active and return its rows as `EXCH:TICKER[]`
+  - `screenName: "Pre-market most active"` → selects that screen, then scrapes
+  - omit `screenName` → scrapes whichever screen is already active (no UI churn)
+  - returns `{ screen, rows, count, complete, total, note?, stale? }`. `complete: false` means the result set overflows the panel and `rows` is partial; `total` is always `null` because TradingView exposes no result count.
+  - `stale: true` appears only when the results table never settled within the internal ~3s budget. It means the row set could not be confirmed to have finished rendering. When `stale` is set, `complete` is meaningless and must not be trusted. A genuinely empty screen returns `count: 0, complete: true, stale: true` — internally consistent, but "complete" there only describes a table that may never have rendered. A screen matching zero rows costs the full ~3s budget, because "this screen matches nothing" and "the table never rendered" are genuinely indistinguishable from the DOM.
+  - fails loudly: an unknown name returns `available[]`, an ambiguous name (the same name in both MY SCREENS and POPULAR SCREENS) returns `matches[]`. It never guesses a screen.
+  - restores the screener panel to the state it found it in.
+
 ### "Navigate the UI"
 - `ui_open_panel` → open/close pine-editor, strategy-tester, watchlist, alerts, trading
 - `ui_click` → click buttons by aria-label, text, or data-name
