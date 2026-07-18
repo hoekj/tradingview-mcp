@@ -187,6 +187,12 @@ export async function layoutSwitch({ name, _deps } = {}) {
 
   const before = await readCurrentLayoutName(_evaluate);
 
+  // Already on the requested layout — navigating anyway would reload the page
+  // and discard unsaved local edits for no gain.
+  if (before && String(before).toLowerCase() === String(match.name).toLowerCase()) {
+    return { success: true, layout: match.name, layout_id: match.url, source: 'navigation', action: 'already_active', verified: true };
+  }
+
   // The active layout is encoded in the page URL, so navigating to the layout's
   // slug is the only reliable switch on TradingView Desktop — the in-page
   // loadChartFromServer/loadLayoutFromServerByLayoutId APIs resolve but never

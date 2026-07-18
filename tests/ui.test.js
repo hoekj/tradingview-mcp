@@ -36,6 +36,29 @@ describe('layoutSwitch()', () => {
     assert.deepEqual(navigations, ['https://www.tradingview.com/chart/7sSXjUUP/']);
   });
 
+  it('skips navigation when the requested layout is already active', async () => {
+    const { deps, navigations } = makeDeps({ currentLayout: () => 'Pre-market scan' });
+
+    const result = await layoutSwitch({ name: 'Pre-market scan', _deps: deps });
+
+    assert.equal(result.success, true);
+    assert.equal(result.action, 'already_active');
+    assert.equal(result.verified, true);
+    assert.equal(result.layout, 'Pre-market scan');
+    assert.deepEqual(navigations, [], 'no navigation for an already-active layout');
+  });
+
+  it('skips navigation when a substring/id reference resolves to the active layout', async () => {
+    // The caller may name the layout loosely; the comparison happens on the
+    // resolved saved-chart name, not on the raw argument.
+    const { deps, navigations } = makeDeps({ currentLayout: () => 'pre-market SCAN' });
+
+    const result = await layoutSwitch({ name: '190561459', _deps: deps });
+
+    assert.equal(result.action, 'already_active');
+    assert.deepEqual(navigations, []);
+  });
+
   it('throws instead of reporting success when the active layout never changes', async () => {
     // Navigation is issued but the layout stays put — exactly the failure the
     // old code masked by returning success:true from a fire-and-forget load.

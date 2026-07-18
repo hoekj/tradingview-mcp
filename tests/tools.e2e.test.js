@@ -243,4 +243,41 @@ describe('layout_switch (live e2e)', () => {
     );
     assert.equal(after.dirty, false, 'the unsaved changes were discarded by the switch');
   });
+
+  // Runs last: it leaves the chart dirty on purpose, and the `after` hook's
+  // switch back to the original layout discards that.
+  it('is a no-op when the requested layout is already active, keeping unsaved changes', { timeout: 120000 }, async () => {
+    const start = await readLayout();
+    original = original || start;
+
+    // Dirty the active layout so a stray navigation would be visible as a loss.
+    const dirtied = await call(handlers, 'ui_evaluate', {
+      expression:
+        `(function(){var c=window.TradingViewApi.activeChart();` +
+        `c.setSymbol(c.symbol()==='NASDAQ:AAPL'?'NASDAQ:MSFT':'NASDAQ:AAPL');` +
+        `var a=window.TradingViewApi;var ss=a.getSaveChartService?a.getSaveChartService():a._saveChartService;` +
+        `return {dirty:ss.hasChanges(),name:String(a.layoutName()),symbol:c.symbol()};})()`,
+    });
+    assert.equal(dirtied.data.result.dirty, true, 'chart is dirty before the no-op switch');
+    const dirtySymbol = dirtied.data.result.symbol;
+
+    const res = await call(handlers, 'layout_switch', { name: dirtied.data.result.name });
+    assert.equal(res.isError, false, JSON.stringify(res.data));
+    assert.equal(res.data.success, true);
+    assert.equal(res.data.action, 'already_active', 'reported as a no-op, not a switch');
+
+    const after = await readLayout();
+    assert.equal(
+      String(after.name).toLowerCase(),
+      String(dirtied.data.result.name).toLowerCase(),
+      'still on the same layout'
+    );
+    assert.equal(after.dirty, true, 'the unsaved changes survived — no reload happened');
+
+    // The symbol is proof the page was never reloaded.
+    const symbolNow = await call(handlers, 'ui_evaluate', {
+      expression: `window.TradingViewApi.activeChart().symbol()`,
+    });
+    assert.equal(symbolNow.data.result, dirtySymbol, 'chart state untouched by the no-op');
+  });
 });
