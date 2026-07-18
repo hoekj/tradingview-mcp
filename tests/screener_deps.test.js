@@ -262,10 +262,18 @@ function makeFullDeps({
   selectLands = true,
   scrapeFails = false,
   closeFails = false,
+  // Optional array of successive scrapeRows() reads for the poll tests below.
+  // Each entry is either 'throw' (simulates the results table not yet being
+  // mounted) or { rows, scrollHeight, clientHeight }. Consumed in order and
+  // cycled (via modulo) if the poll outlives the array — this lets a short
+  // array express "never settles" for the exhaustion tests. Defaults to null
+  // so every existing test keeps using the single-shot scrapeFails/keys
+  // behavior below, completely unaffected.
+  scrapeReads = null,
 } = {}) {
   const state = {
     open: startOpen, active, dialogOpen: false,
-    keys: [], typed: null, clicks: [], closed: false, escapes: 0,
+    keys: [], typed: null, clicks: [], closed: false, escapes: 0, scrapeCalls: 0,
   };
   const deps = {
     evaluate: async (expr) => {
@@ -283,6 +291,12 @@ function makeFullDeps({
         return { ok: true, rows: q ? rows.filter(r => r.name.toLowerCase().includes(q)) : rows };
       }
       if (src.includes('selectable-rows-table-body')) {
+        if (scrapeReads) {
+          const entry = scrapeReads[state.scrapeCalls % scrapeReads.length];
+          state.scrapeCalls++;
+          if (entry === 'throw') { return { ok: false, reason: 'no_results_table' }; }
+          return { ok: true, rows: entry.rows, scrollHeight: entry.scrollHeight, clientHeight: entry.clientHeight };
+        }
         if (scrapeFails) { return { ok: false, reason: 'no_results_table' }; }
         return {
           ok: true, rows: keys,
@@ -452,5 +466,104 @@ describe('get()', () => {
     assert.equal(res.success, false, 'the real not_found error is returned, not a cleanup error');
     assert.match(res.error, /not found/i);
     assert.equal(state.closed, false, 'the close attempt failed as configured');
+  });
+});
+
+describe('get() — results poll (waitForResultsReady)', () => {
+  it('retries a zero-row first read and succeeds with the settled non-empty rows', async () => {
+    const { deps } = makeFullDeps({
+      startOpen: true,
+      active: 'Cam Prefilter',
+      scrapeReads: [
+        { rows: [], scrollHeight: null, clientHeight: null },
+        { rows: ['NYSE:AAA', 'NASDAQ:BBB'], scrollHeight: 400, clientHeight: 400 },
+        { rows: ['NYSE:AAA', 'NASDAQ:BBB'], scrollHeight: 400, clientHeight: 400 },
+      ],
+    });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, true);
+    assert.deepEqual(res.rows, ['NYSE:AAA', 'NASDAQ:BBB'], 'settled rows returned once the table populates');
+    assert.equal(res.count, 2);
+    assert.equal(res.stale, undefined, 'a settled read is not stale');
+  });
+
+  it('returns the SETTLED reading, not the first non-empty one, once counts stop changing', async () => {
+    const { deps } = makeFullDeps({
+      startOpen: true,
+      active: 'Cam Prefilter',
+      scrapeReads: [
+        { rows: ['NYSE:AAA'], scrollHeight: 500, clientHeight: 300 },
+        { rows: ['NYSE:AAA', 'NASDAQ:BBB'], scrollHeight: 700, clientHeight: 300 },
+        { rows: ['NYSE:AAA', 'NASDAQ:BBB', 'AMEX:CCC'], scrollHeight: 900, clientHeight: 300 },
+        { rows: ['NYSE:AAA', 'NASDAQ:BBB', 'AMEX:CCC'], scrollHeight: 900, clientHeight: 300 },
+      ],
+    });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, true);
+    assert.deepEqual(
+      res.rows,
+      ['NYSE:AAA', 'NASDAQ:BBB', 'AMEX:CCC'],
+      'the settled 3-row reading is returned, not the first non-empty 1-row reading'
+    );
+    assert.equal(res.count, 3);
+    assert.equal(res.stale, undefined);
+  });
+
+  it('retries a scrapeRows throw on early ticks and succeeds once the table mounts', async () => {
+    const { deps } = makeFullDeps({
+      startOpen: true,
+      active: 'Cam Prefilter',
+      scrapeReads: [
+        'throw',
+        'throw',
+        { rows: ['NYSE:ZZZ'], scrollHeight: 300, clientHeight: 300 },
+        { rows: ['NYSE:ZZZ'], scrollHeight: 300, clientHeight: 300 },
+      ],
+    });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, true, 'an early mount-race throw does not fail the call');
+    assert.deepEqual(res.rows, ['NYSE:ZZZ']);
+    assert.equal(res.stale, undefined);
+  });
+
+  it('re-raises as a normal failure when every tick throws until the budget expires', async () => {
+    const { deps } = makeFullDeps({
+      startOpen: true,
+      active: 'Cam Prefilter',
+      scrapeReads: ['throw'],
+    });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, false, 'a genuinely absent table still surfaces as a failure');
+    assert.match(res.error, /could not read the screener results table/i);
+  });
+
+  it('marks the result stale when the budget expires without ever settling', async () => {
+    const { deps } = makeFullDeps({
+      startOpen: true,
+      active: 'Cam Prefilter',
+      // Alternates forever with rows always empty — adjacent reads never agree,
+      // so the poll never settles and must exhaust its budget.
+      scrapeReads: [
+        { rows: [], scrollHeight: 100, clientHeight: 50 },
+        { rows: [], scrollHeight: 200, clientHeight: 50 },
+      ],
+    });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, true, 'exhaustion is not an error');
+    assert.equal(res.count, 0, 'count stays truthful to the last read');
+    assert.equal(res.total, null);
+    assert.equal(res.stale, true, 'the caller can tell this result was never proven settled');
+  });
+
+  it('settles cleanly on a genuinely stable zero-row screen, with no stale flag', async () => {
+    const { deps } = makeFullDeps({
+      startOpen: true,
+      active: 'Cam Prefilter',
+      scrapeReads: [{ rows: [], scrollHeight: 376, clientHeight: 376 }],
+    });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, true);
+    assert.equal(res.count, 0);
+    assert.equal(res.stale, undefined, 'a stable empty read is a proven zero-row result, not exhaustion');
   });
 });

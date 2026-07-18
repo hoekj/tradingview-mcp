@@ -34,14 +34,24 @@ describe('screener core (live e2e)', () => {
     // task-6-report.md for the reproduction.
     try {
       if (startingScreen) {
-        await screener.get({ screenName: startingScreen });
+        const restored = await screener.get({ screenName: startingScreen });
+        if (!restored.success) {
+          // Never swallow this silently — a failed restore leaves the user's
+          // real trading workspace on the wrong screen even though the suite
+          // itself reports green.
+          console.warn(
+            `screener.core.test.js: failed to restore starting screen "${startingScreen}": ${restored.error}`
+          );
+        }
       }
       if (startedOpen) {
         await screener.ensureScreenerOpen();
       } else {
         await screener.closeScreenerPanel();
       }
-    } catch (_) {}
+    } catch (err) {
+      console.warn(`screener.core.test.js: cleanup threw while restoring workspace state: ${err.message}`);
+    }
     await disconnect();
   });
 
@@ -58,6 +68,7 @@ describe('screener core (live e2e)', () => {
 
   it('returns exchange-qualified symbols', async () => {
     const res = await screener.get({ screenName: SCREEN });
+    assert.ok(res.rows.length > 0, 'precondition: there are rows to check — otherwise this test passes vacuously');
     for (const row of res.rows) {
       assert.match(row, /^[A-Z]+:[A-Z0-9.]+$/, `${row} is EXCH:TICKER`);
     }
@@ -117,6 +128,26 @@ describe('screener core (live e2e)', () => {
 
     const name = await screener.getActiveScreenName();
     assert.equal(name, SCREEN, 'panel left open, as it was found');
+  });
+
+  it('reports complete:false on a screen large enough to overflow the results scroller', async () => {
+    // "All stocks" is a POPULAR SCREENS entry present in every workspace, so
+    // this needs no user-specific fixture. It also exercises the large-screen
+    // path where a settle-on-first-non-empty-read bug would truncate rows
+    // while still reporting complete:true — the scroller anchor
+    // (body.closest('[class*="wrapper"]')) is the most fragile part of this
+    // module, and `assert.equal(typeof res.complete, 'boolean')` elsewhere in
+    // this file is satisfied even by a hardcoded `true`, so this is the only
+    // test that actually proves complete:false is reachable.
+    const res = await screener.get({ screenName: 'All stocks' });
+    assert.equal(res.success, true);
+    assert.equal(res.complete, false, 'All stocks has enough rows to overflow the results scroller');
+    assert.ok(res.count >= 100, `expected at least 100 rows, got ${res.count}`);
+
+    // Restore to the suite's screen before the next test runs.
+    const restored = await screener.get({ screenName: SCREEN });
+    assert.equal(restored.success, true);
+    await sleep(300);
   });
 
   it('leaves no dialog open after a failed call', async () => {

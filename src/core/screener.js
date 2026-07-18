@@ -335,31 +335,67 @@ export async function scrapeRows(_deps) {
 }
 
 /**
- * Poll `scrapeRows` until it returns a non-empty row list or the budget
- * expires, then return the last read.
+ * Poll `scrapeRows` until two consecutive reads agree on both row count and
+ * scrollHeight (a "settled" read), or the budget expires.
  *
  * The results table remounts whenever the panel opens or the active screen
- * changes, and for a brief window afterwards it reports zero rows alongside
- * stale scroll measurements (observed live: transient scrollHeight/clientHeight
- * values that do not match the settled DOM). A screen with genuinely zero
- * matches is not a realistic steady state for the screens this tool targets,
- * so a bounded retry resolves the render race without masking a real failure
- * — after the budget expires the last (possibly empty) read is still returned
- * rather than raising an error.
+ * changes. Immediately afterwards it can report a transient state — rows
+ * populated but the scroll container not yet grown, or a stale
+ * scrollHeight/clientHeight pair (observed live: transient 1070/620 before
+ * settling to 376/376) — so a single non-empty read is not proof rendering
+ * has finished; it only proves rendering has STARTED. Requiring two
+ * consecutive matching reads catches that transition. The returned reading
+ * always comes from a single `scrapeRows` observation — rows and scroll
+ * measurements are never merged across polls, so `complete` is never derived
+ * from measurements that never coexisted with the returned rows.
+ *
+ * `scrapeRows` can also throw while the results table has not yet mounted —
+ * the more likely state immediately after a remount, and earlier than the
+ * "table present but empty" case. A throw is treated as a non-ready tick and
+ * retried, not raised, unless every tick in the whole budget throws (a
+ * genuinely absent table must still surface that error).
+ *
+ * A screen that genuinely matches zero rows is a legitimate steady state for
+ * this tool (e.g. a pre-market screen outside pre-market hours) — it is NOT
+ * safe to assume otherwise. When two consecutive empty reads agree, that is a
+ * settled (non-stale) empty result. Only when the budget expires without ever
+ * settling is the last successful read returned with `settled: false`, so the
+ * caller can flag the result as possibly incomplete instead of silently
+ * treating it as a proven answer.
  */
 async function waitForResultsReady(d, { maxMs = 3000, interval = 100 } = {}) {
   const ticks = Math.ceil(maxMs / interval);
+  let prev = null;
   let last = { rows: [], scrollHeight: null, clientHeight: null };
+  let sawSuccess = false;
+  let lastErr = null;
+
   for (let i = 0; i < ticks; i++) {
-    last = await scrapeRows(d);
-    if (last.rows.length > 0) {
-      return last;
+    let current;
+    try {
+      current = await scrapeRows(d);
+    } catch (err) {
+      lastErr = err;
+      if (i < ticks - 1) {
+        await d.sleep(interval);
+      }
+      continue;
     }
+    sawSuccess = true;
+    last = current;
+    if (prev && prev.rows.length === current.rows.length && prev.scrollHeight === current.scrollHeight) {
+      return { ...last, settled: true };
+    }
+    prev = current;
     if (i < ticks - 1) {
       await d.sleep(interval);
     }
   }
-  return last;
+
+  if (!sawSuccess) {
+    throw lastErr;
+  }
+  return { ...last, settled: false };
 }
 
 /**
@@ -454,8 +490,11 @@ export async function get({ screenName, _deps } = {}) {
       note = 'already active';
     }
 
-    const screen = await getActiveScreenName(d);
+    // Read the active screen name AFTER the poll settles, not before — the
+    // poll can run for up to its full budget, and reading the label first
+    // would let `screen` report a value that is stale by that whole window.
     const scraped = await waitForResultsReady(d);
+    const screen = await getActiveScreenName(d);
     const result = {
       success: true,
       screen,
@@ -466,6 +505,13 @@ export async function get({ screenName, _deps } = {}) {
     };
     if (note) {
       result.note = note;
+    }
+    if (!scraped.settled) {
+      // The poll exhausted its budget without ever observing two consecutive
+      // matching reads. The rows and completeness above are the last read
+      // taken, but callers should not treat them as proven — they may be
+      // truncated by the same transition the poll exists to wait out.
+      result.stale = true;
     }
     return result;
   } catch (err) {
