@@ -8,7 +8,7 @@
  */
 
 import { evaluate as evaluateImpl } from '../connection.js';
-import { click as clickImpl, keyboard as keyboardImpl } from './ui.js';
+import { click as clickImpl, keyboard as keyboardImpl, typeText as typeTextImpl } from './ui.js';
 
 const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -22,6 +22,7 @@ function resolveDeps(_deps) {
     evaluate: _deps?.evaluate || evaluateImpl,
     click: _deps?.click || clickImpl,
     keyboard: _deps?.keyboard || keyboardImpl,
+    typeText: _deps?.typeText || typeTextImpl,
     sleep: _deps?.sleep || defaultSleep,
   };
 }
@@ -169,5 +170,130 @@ export async function closeScreenerPanel(_deps) {
   if (!gone) {
     throw new Error('Could not close the screener panel — the Close button was clicked but the panel is still open');
   }
+  return true;
+}
+
+/**
+ * Open the "Open screen…" dialog from the active-screen title menu.
+ *
+ * The menu item has no data-name, and both synthetic .click() and dispatched
+ * pointer events silently no-op on it. JS .focus() IS reliable, so the item is
+ * activated by focusing its [tabindex="0"] ancestor and sending a real Enter
+ * key through CDP. Menu items render as nested duplicate layers sharing the
+ * same innerText, so the real target is the visible childless leaf.
+ */
+export async function openScreenDialog(_deps) {
+  const d = resolveDeps(_deps);
+
+  await d.click({ by: 'data-name', value: 'screener-topbar-screen-title' });
+  await d.sleep(400);
+
+  const focused = await d.evaluate(`
+    (function() {
+      var all = document.querySelectorAll('*');
+      var leaf = null;
+      for (var i = 0; i < all.length; i++) {
+        var e = all[i];
+        if (e.offsetParent === null) { continue; }
+        if (e.children.length !== 0) { continue; }
+        if ((e.innerText || '').trim() !== 'Open screen…') { continue; }
+        leaf = e;
+        break;
+      }
+      if (!leaf) { return { ok: false, reason: 'menu not open' }; }
+      var btn = leaf.closest('[tabindex="0"]');
+      if (!btn) { return { ok: false, reason: 'no focusable ancestor' }; }
+      btn.focus();
+      return { ok: document.activeElement === btn };
+    })()
+  `);
+
+  if (!focused?.ok) {
+    throw new Error('Open screen dialog did not open — TradingView DOM may have changed');
+  }
+
+  await d.keyboard({ key: 'Enter' });
+
+  const appeared = await waitFor(
+    () => d.evaluate(`!!document.querySelector('[data-name="screener-custom-screens-dialog"]')`),
+    d
+  );
+  if (!appeared) {
+    throw new Error('Open screen dialog did not open — TradingView DOM may have changed');
+  }
+  return true;
+}
+
+/**
+ * Read every screen listed in the dialog, tagged with its section.
+ *
+ * The dialog lists MY SCREENS and POPULAR SCREENS together, and each entry has
+ * a description leaf as well as a title leaf, so only the hashed title- rows
+ * are collected. Walking in document order and tracking the most recent section
+ * heading also excludes the dialog's own "Open screen" header, which precedes
+ * the first heading and therefore has no section.
+ */
+export async function readDialogRows(_deps) {
+  const d = resolveDeps(_deps);
+  const res = await d.evaluate(`
+    (function() {
+      var dlg = document.querySelector('[data-name="screener-custom-screens-dialog"]');
+      if (!dlg) { return { ok: false, reason: 'dialog_gone' }; }
+      var all = dlg.querySelectorAll('*');
+      var section = null;
+      var seen = {};
+      var out = [];
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        if (el.offsetParent === null) { continue; }
+        var text = (el.innerText || '').trim();
+        if (!text) { continue; }
+        if (el.children.length === 0 && (text === 'MY SCREENS' || text === 'POPULAR SCREENS')) {
+          section = text;
+          continue;
+        }
+        if (!section) { continue; }
+        if (String(el.className || '').indexOf('title-') < 0) { continue; }
+        var key = section + '|' + text;
+        if (seen[key]) { continue; }
+        seen[key] = true;
+        out.push({ name: text, section: section });
+      }
+      return { ok: true, rows: out };
+    })()
+  `);
+
+  if (!res?.ok) {
+    throw new Error('Open screen dialog closed unexpectedly — TradingView DOM may have changed');
+  }
+  return res.rows || [];
+}
+
+/**
+ * Focus the dialog's Search box and type the literal screen name, narrowing
+ * the list deterministically before selection.
+ */
+export async function searchDialog(name, _deps) {
+  const d = resolveDeps(_deps);
+  const focused = await d.evaluate(`
+    (function() {
+      var inputs = document.querySelectorAll('input');
+      for (var i = 0; i < inputs.length; i++) {
+        if (inputs[i].placeholder === 'Search' && inputs[i].offsetParent !== null) {
+          inputs[i].focus();
+          inputs[i].setSelectionRange(0, inputs[i].value.length);
+          return { ok: true };
+        }
+      }
+      return { ok: false };
+    })()
+  `);
+
+  if (!focused?.ok) {
+    throw new Error('Could not focus the screen Search box — TradingView DOM may have changed');
+  }
+
+  await d.typeText({ text: String(name) });
+  await d.sleep(400);
   return true;
 }

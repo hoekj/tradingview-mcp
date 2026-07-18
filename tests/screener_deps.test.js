@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickScreenMatch, deriveComplete, ensureScreenerOpen, closeScreenerPanel, getActiveScreenName } from '../src/core/screener.js';
+import { pickScreenMatch, deriveComplete, ensureScreenerOpen, closeScreenerPanel, getActiveScreenName, openScreenDialog, readDialogRows, searchDialog } from '../src/core/screener.js';
 
 const ROWS = [
   { name: 'Pre-market most active', section: 'MY SCREENS' },
@@ -159,5 +159,93 @@ describe('getActiveScreenName()', () => {
   it('returns null when the screener is closed', async () => {
     const { deps } = makePanelDeps({ open: false });
     assert.equal(await getActiveScreenName(deps), null);
+  });
+});
+
+const DIALOG_ROWS = [
+  { name: 'Pre-market most active', section: 'MY SCREENS' },
+  { name: 'Most active', section: 'MY SCREENS' },
+  { name: 'All stocks', section: 'POPULAR SCREENS' },
+];
+
+function makeDialogDeps({ menuOpens = true, dialogOpens = true, rows = DIALOG_ROWS, hasInput = true } = {}) {
+  const state = { dialogOpen: false, keys: [], typed: null, clicks: [] };
+  const deps = {
+    evaluate: async (expr) => {
+      const src = String(expr);
+      if (src.includes("'Open screen…'")) {
+        return menuOpens ? { ok: true } : { ok: false, reason: 'menu not open' };
+      }
+      if (src.includes('screener-custom-screens-dialog') && src.includes('!!')) {
+        return state.dialogOpen;
+      }
+      if (src.includes("placeholder === 'Search'") || src.includes('placeholder=="Search"')) {
+        return hasInput ? { ok: true } : { ok: false };
+      }
+      if (src.includes('MY SCREENS')) {
+        if (!state.dialogOpen) { return { ok: false, reason: 'dialog_gone' }; }
+        return { ok: true, rows };
+      }
+      return null;
+    },
+    click: async ({ by, value }) => { state.clicks.push(`${by}:${value}`); return { success: true }; },
+    keyboard: async ({ key }) => {
+      state.keys.push(key);
+      if (key === 'Enter' && state.keys.length === 1 && dialogOpens) { state.dialogOpen = true; }
+      return { success: true };
+    },
+    typeText: async ({ text }) => { state.typed = text; return { success: true }; },
+    sleep: async () => {},
+  };
+  return { deps, state };
+}
+
+describe('openScreenDialog()', () => {
+  it('clicks the title, focuses the menu item and presses Enter', async () => {
+    const { deps, state } = makeDialogDeps({});
+    const res = await openScreenDialog(deps);
+    assert.equal(res, true);
+    assert.deepEqual(state.clicks, ['data-name:screener-topbar-screen-title']);
+    assert.deepEqual(state.keys, ['Enter'], 'activated with a real Enter key');
+  });
+
+  it('throws when the title menu does not open', async () => {
+    const { deps } = makeDialogDeps({ menuOpens: false });
+    await assert.rejects(() => openScreenDialog(deps), /did not open/i);
+  });
+
+  it('throws when Enter does not produce the dialog', async () => {
+    const { deps } = makeDialogDeps({ dialogOpens: false });
+    await assert.rejects(() => openScreenDialog(deps), /did not open/i);
+  });
+});
+
+describe('readDialogRows()', () => {
+  it('returns rows tagged with their section', async () => {
+    const { deps, state } = makeDialogDeps({});
+    state.dialogOpen = true;
+    const rows = await readDialogRows(deps);
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows[0], { name: 'Pre-market most active', section: 'MY SCREENS' });
+    assert.equal(rows[2].section, 'POPULAR SCREENS');
+  });
+
+  it('throws when the dialog has closed underneath it', async () => {
+    const { deps } = makeDialogDeps({});
+    await assert.rejects(() => readDialogRows(deps), /dialog/i);
+  });
+});
+
+describe('searchDialog()', () => {
+  it('focuses the search input and types the literal name', async () => {
+    const { deps, state } = makeDialogDeps({});
+    const res = await searchDialog('Cam Prefilter', deps);
+    assert.equal(res, true);
+    assert.equal(state.typed, 'Cam Prefilter');
+  });
+
+  it('throws when the search input is missing', async () => {
+    const { deps } = makeDialogDeps({ hasInput: false });
+    await assert.rejects(() => searchDialog('X', deps), /search/i);
   });
 });
