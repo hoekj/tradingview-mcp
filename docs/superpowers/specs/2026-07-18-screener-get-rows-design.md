@@ -34,7 +34,13 @@ The tool is generic — it has no knowledge of any consumer. Its whole contract 
 - **No result-count element exists.** A search of the screener panel for match/result/symbol counts and for
   numeric leaf nodes returned nothing. The row total is not observable.
 - **Verified idempotent:** clicking `screener-dialog-button` while the screener is already open does not
-  toggle it closed.
+  toggle it closed. There is therefore no toggle-off; closing needs a separate affordance.
+- **The screener panel has no close button of its own.** Its toolbar offers Save/Undo/Redo/Settings/
+  Refresh/Maximize/Search only. The close affordance lives in the surrounding panel chrome, outside
+  `[class*="screenerContainer"]`: a real `<button>` with `aria-label="Close"` (alongside one labelled
+  `Collapse panel`). Clicking it unmounts the container and the results `tbody` entirely — verified.
+- **`aria-label="Close"` is not unique** across the page. It must be resolved by proximity to the screener
+  panel, not by a global lookup, or a call made while some other dialog is open could close the wrong thing.
 
 ### Stable anchors
 
@@ -47,6 +53,7 @@ The tool is generic — it has no knowledge of any consumer. Its whole contract 
 | Search input | visible `input[placeholder="Search"]` | filters the list as you type |
 | Screen rows | `[class*="title-"]` within the dialog, visible only | hashed class is a hint; match on `innerText` |
 | Result rows | `tbody[data-testid="selectable-rows-table-body"] tr.listRow` | `data-rowkey` = `EXCH:TICKER` |
+| Close-panel button | `button[aria-label="Close"]` in the panel chrome **outside** `[class*="screenerContainer"]` | label is not unique page-wide — resolve by proximity |
 
 ## Architecture
 
@@ -55,7 +62,7 @@ generic primitives; a screener flow is domain logic, not a primitive).
 
 - `src/core/screener.js` — public `get({ screenName })`; private `ensureScreenerOpen()`,
   `getActiveScreenName()`, `openScreenDialog()`, `findScreenRows(name)`, `scrapeRows()`,
-  `closeScreenMenu()`
+  `closeScreenMenu()`, `closeScreenerPanel()`
 - `src/tools/screener.js` — `registerScreenerTools(server)`
 - `src/core/index.js` — `export * as screener from './screener.js'`
 - `src/server.js` — call `registerScreenerTools(server)` alongside the existing registrations
@@ -102,7 +109,8 @@ because TradingView does not expose that — but it is never told a partial set 
 ## Flow
 
 1. **`ensureScreenerOpen()`** — if `[data-name="screener-topbar-screen-title"]` is absent, click
-   `[data-name="screener-dialog-button"]` and poll for the title to appear.
+   `[data-name="screener-dialog-button"]` and poll for the title to appear. **Returns whether it opened the
+   panel**; the caller keeps that flag for step 9.
 2. **Short-circuit** — read the active screen name. If `screenName` is omitted, or matches case-insensitively
    after trimming, skip straight to step 8 (scrape); there is nothing to select and nothing to verify.
    Avoids redundant load time and UI churn.
@@ -121,7 +129,13 @@ because TradingView does not expose that — but it is never told a partial set 
      select; the highlight must first move from the search box into the list.
 7. **Verify by readback** — poll until the dialog is closed and the title equals the requested name. A
    mismatch is a failure, not a warning.
-8. **Scrape and return** — collect `data-rowkey` from the result rows, derive `complete`, return.
+8. **Scrape** — collect `data-rowkey` from the result rows and derive `complete`.
+9. **`closeScreenerPanel()` — restore the prior panel state.** If step 1 opened the panel, close it; if the
+   user already had it open, leave it open. Runs on **every** exit path, success or failure, in a
+   `try/catch` so a close failure never masks the real result. Resolve the close button by proximity —
+   locate `[class*="screenerContainer"]`, walk up to the panel chrome, and take the
+   `button[aria-label="Close"]` there — never a page-wide `aria-label` lookup. Verify the container is gone.
+10. **Return.**
 
 Matching is exact (case-insensitive, trimmed), never substring. A substring match on a two-section list is
 how a caller silently gets the wrong screen.
@@ -146,8 +160,12 @@ DOM-change messages are worded distinctly from bad-name messages, so a TradingVi
 masquerade as a caller typo.
 
 **Cleanup:** every failure path calls `closeScreenMenu()` — Escape via CDP inside `try/catch`, then
-`sleep(400)` — so a failed call leaves the UI as it found it, never with an open dialog. This mirrors
-`escapeRecover()` in `src/tools/watchlist.js:7-14`.
+`sleep(400)` — so a failed call never leaves a dialog open. This mirrors `escapeRecover()` in
+`src/tools/watchlist.js:7-14`. It then runs the same `closeScreenerPanel()` restore as the success path
+(step 9), so an aborted call does not strand an open screener either.
+
+Both cleanups are best-effort and wrapped in `try/catch`: a failure to tidy the UI is never allowed to
+overwrite the error that actually caused the failure.
 
 ## Waits
 
@@ -192,7 +210,9 @@ Cases:
 - omitted `screenName` returns the active screen's rows
 - bogus name (`'__no_such_screen__'`) returns `success:false` with a non-empty `available[]`
 - opening from a **closed** screener panel works (close the panel first, then call)
-- the UI is left with no dialog open after a failed call
+- **panel state is restored:** called with the panel closed, it is closed again afterwards; called with the
+  panel already open, it is still open afterwards
+- the UI is left with no dialog open after a failed call, and the panel state is restored on that path too
 
 Live prerequisites: TV Desktop up with CDP on 9222, and `Pre-market most active` saved in MY SCREENS.
 
