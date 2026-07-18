@@ -297,3 +297,155 @@ export async function searchDialog(name, _deps) {
   await d.sleep(400);
   return true;
 }
+
+/**
+ * Read the visible result rows.
+ *
+ * data-rowkey is the only carrier of the exchange-qualified symbol
+ * (e.g. NYSE:NOK) and is returned verbatim — never reduced to a bare ticker.
+ * The scroller measurements travel with the rows so completeness is decided in
+ * Node, where it can be tested, rather than in the page.
+ */
+export async function scrapeRows(_deps) {
+  const d = resolveDeps(_deps);
+  const res = await d.evaluate(`
+    (function() {
+      var body = document.querySelector('tbody[data-testid="selectable-rows-table-body"]');
+      if (!body) { return { ok: false, reason: 'no_results_table' }; }
+      var trs = body.querySelectorAll('tr.listRow');
+      var rows = [];
+      for (var i = 0; i < trs.length; i++) {
+        var key = trs[i].getAttribute('data-rowkey');
+        if (key) { rows.push(key); }
+      }
+      var scroller = body.closest('[class*="wrapper"]');
+      return {
+        ok: true,
+        rows: rows,
+        scrollHeight: scroller ? scroller.scrollHeight : null,
+        clientHeight: scroller ? scroller.clientHeight : null,
+      };
+    })()
+  `);
+
+  if (!res?.ok) {
+    throw new Error('Could not read the screener results table — TradingView DOM may have changed');
+  }
+  return { rows: res.rows || [], scrollHeight: res.scrollHeight, clientHeight: res.clientHeight };
+}
+
+/**
+ * Dismiss the screen dialog or title menu with Escape so a failed call never
+ * strands an overlay open. Best-effort: a cleanup failure must never overwrite
+ * the error that caused it.
+ */
+async function closeScreenMenu(_deps) {
+  const d = resolveDeps(_deps);
+  try {
+    await d.keyboard({ key: 'Escape' });
+    await d.sleep(400);
+  } catch (_) {}
+}
+
+/**
+ * Make `screenName` the active screen and return its rows.
+ *
+ * Omitting screenName scrapes whatever screen is already active, with no menu,
+ * dialog or typing — the cheap path for "what is on the screener right now".
+ * The panel is restored to the state it was found in on every exit path.
+ */
+export async function get({ screenName, _deps } = {}) {
+  const d = resolveDeps(_deps);
+  const wantsSelection = screenName !== undefined && screenName !== null;
+
+  if (wantsSelection && String(screenName).trim() === '') {
+    return { success: false, error: 'screenName is required' };
+  }
+  const target = wantsSelection ? String(screenName).trim() : null;
+
+  let openedByUs = false;
+  let note = null;
+
+  try {
+    const opened = await ensureScreenerOpen(d);
+    openedByUs = opened.opened;
+
+    const active = await getActiveScreenName(d);
+    const alreadyActive = target !== null
+      && active !== null
+      && active.toLowerCase() === target.toLowerCase();
+
+    if (target !== null && !alreadyActive) {
+      await openScreenDialog(d);
+      await searchDialog(target, d);
+
+      const rows = await readDialogRows(d);
+      const picked = pickScreenMatch(rows, target);
+
+      if (picked.status === 'not_found') {
+        await closeScreenMenu(d);
+        return {
+          success: false,
+          error: 'Screen "' + target + '" not found',
+          available: picked.available,
+        };
+      }
+      if (picked.status === 'ambiguous') {
+        await closeScreenMenu(d);
+        return {
+          success: false,
+          error: 'Screen "' + target + '" is ambiguous',
+          matches: picked.matches,
+        };
+      }
+
+      // The highlight must move from the search box into the list first —
+      // Enter on its own does not select.
+      await d.keyboard({ key: 'ArrowDown' });
+      await d.keyboard({ key: 'Enter' });
+      await d.sleep(400);
+
+      const landed = await waitFor(async () => {
+        const now = await getActiveScreenName(d);
+        return now !== null && now.toLowerCase() === target.toLowerCase();
+      }, d);
+
+      if (!landed) {
+        const now = await getActiveScreenName(d);
+        await closeScreenMenu(d);
+        return {
+          success: false,
+          error: 'Clicked "' + target + '" but the active screen is "' + now + '"',
+        };
+      }
+    } else if (alreadyActive) {
+      note = 'already active';
+    }
+
+    const screen = await getActiveScreenName(d);
+    const scraped = await scrapeRows(d);
+    const result = {
+      success: true,
+      screen,
+      count: scraped.rows.length,
+      complete: deriveComplete(scraped),
+      total: null,
+      rows: scraped.rows,
+    };
+    if (note) {
+      result.note = note;
+    }
+    return result;
+  } catch (err) {
+    await closeScreenMenu(d);
+    return { success: false, error: err.message };
+  } finally {
+    // Restore the panel to the state it was found in. Best-effort: never let a
+    // cleanup failure mask the real result.
+    if (openedByUs) {
+      try {
+        await closeScreenerPanel(d);
+      } catch (_) {}
+    }
+  }
+}

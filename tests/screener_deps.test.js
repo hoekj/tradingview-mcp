@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { pickScreenMatch, deriveComplete, ensureScreenerOpen, closeScreenerPanel, getActiveScreenName, openScreenDialog, readDialogRows, searchDialog } from '../src/core/screener.js';
+import { pickScreenMatch, deriveComplete, ensureScreenerOpen, closeScreenerPanel, getActiveScreenName, openScreenDialog, readDialogRows, searchDialog, get, scrapeRows } from '../src/core/screener.js';
 
 const ROWS = [
   { name: 'Pre-market most active', section: 'MY SCREENS' },
@@ -247,5 +247,172 @@ describe('searchDialog()', () => {
   it('throws when the search input is missing', async () => {
     const { deps } = makeDialogDeps({ hasInput: false });
     await assert.rejects(() => searchDialog('X', deps), /search/i);
+  });
+});
+
+const KEYS = ['NYSE:NOK', 'NASDAQ:SOFI', 'AMEX:PSLV'];
+
+// A full fake of the screener surface: panel, title menu, dialog, results table.
+function makeFullDeps({
+  startOpen = false,
+  active = 'Cam Prefilter',
+  rows = DIALOG_ROWS,
+  keys = KEYS,
+  overflow = false,
+  selectLands = true,
+} = {}) {
+  const state = {
+    open: startOpen, active, dialogOpen: false,
+    keys: [], typed: null, clicks: [], closed: false, escapes: 0,
+  };
+  const deps = {
+    evaluate: async (expr) => {
+      const src = String(expr);
+      if (src.includes('screener-topbar-screen-title') && src.includes('!!')) { return state.open; }
+      if (src.includes('screener-topbar-screen-title') && src.includes('innerText')) {
+        return state.open ? state.active : null;
+      }
+      if (src.includes("'Open screen…'")) { return { ok: true }; }
+      if (src.includes('screener-custom-screens-dialog') && src.includes('!!')) { return state.dialogOpen; }
+      if (src.includes("placeholder === 'Search'")) { return { ok: true }; }
+      if (src.includes('MY SCREENS')) {
+        if (!state.dialogOpen) { return { ok: false, reason: 'dialog_gone' }; }
+        const q = (state.typed || '').trim().toLowerCase();
+        return { ok: true, rows: q ? rows.filter(r => r.name.toLowerCase().includes(q)) : rows };
+      }
+      if (src.includes('selectable-rows-table-body')) {
+        return {
+          ok: true, rows: keys,
+          scrollHeight: overflow ? 900 : 378,
+          clientHeight: 378,
+        };
+      }
+      if (src.includes('screenerContainer') && src.trim().startsWith('!')) { return !state.open; }
+      if (src.includes('aria-label="Close"')) {
+        if (!state.open) { return { ok: true, note: 'already closed' }; }
+        state.open = false; state.closed = true;
+        return { ok: true, clicked: true };
+      }
+      return null;
+    },
+    click: async ({ by, value }) => {
+      state.clicks.push(`${by}:${value}`);
+      if (value === 'screener-dialog-button') { state.open = true; }
+      return { success: true };
+    },
+    keyboard: async ({ key }) => {
+      state.keys.push(key);
+      if (key === 'Enter' && !state.dialogOpen) { state.dialogOpen = true; return { success: true }; }
+      if (key === 'Enter' && state.dialogOpen && state.keys.includes('ArrowDown')) {
+        state.dialogOpen = false;
+        if (selectLands) { state.active = (state.typed || '').trim(); }
+      }
+      if (key === 'Escape') { state.escapes++; state.dialogOpen = false; }
+      return { success: true };
+    },
+    typeText: async ({ text }) => { state.typed = text; return { success: true }; },
+    sleep: async () => {},
+  };
+  return { deps, state };
+}
+
+describe('scrapeRows()', () => {
+  it('returns rowkeys verbatim with the scroller measurements', async () => {
+    const { deps } = makeFullDeps({ startOpen: true });
+    const res = await scrapeRows(deps);
+    assert.deepEqual(res.rows, KEYS, 'exchange-qualified symbols preserved');
+    assert.equal(res.clientHeight, 378);
+  });
+});
+
+describe('get()', () => {
+  it('selects the requested screen and returns its rows', async () => {
+    const { deps, state } = makeFullDeps({ active: 'Cam Prefilter' });
+    const res = await get({ screenName: 'Pre-market most active', _deps: deps });
+    assert.equal(res.success, true, 'succeeds');
+    assert.equal(res.screen, 'Pre-market most active', 'reports the active screen');
+    assert.deepEqual(res.rows, KEYS);
+    assert.equal(res.count, 3);
+    assert.equal(res.complete, true);
+    assert.equal(res.total, null, 'total is never inferred');
+    assert.deepEqual(state.keys.filter(k => k === 'ArrowDown'), ['ArrowDown'], 'highlight moved into the list before Enter');
+  });
+
+  it('short-circuits when the screen is already active', async () => {
+    const { deps, state } = makeFullDeps({ active: 'Pre-market most active' });
+    const res = await get({ screenName: 'pre-market MOST active', _deps: deps });
+    assert.equal(res.success, true);
+    assert.equal(res.note, 'already active');
+    assert.deepEqual(state.clicks.filter(c => c.includes('screen-title')), [], 'the title menu was never opened');
+  });
+
+  it('scrapes the active screen when screenName is omitted', async () => {
+    const { deps, state } = makeFullDeps({ active: 'Cam Prefilter' });
+    const res = await get({ _deps: deps });
+    assert.equal(res.success, true);
+    assert.equal(res.screen, 'Cam Prefilter');
+    assert.equal(state.typed, null, 'no search was performed');
+  });
+
+  it('returns not_found with the available list', async () => {
+    const { deps } = makeFullDeps({ active: 'Cam Prefilter' });
+    const res = await get({ screenName: '__no_such_screen__', _deps: deps });
+    assert.equal(res.success, false);
+    assert.match(res.error, /not found/i);
+    assert.ok(Array.isArray(res.available), 'available is a list');
+  });
+
+  it('refuses an ambiguous name rather than guessing', async () => {
+    const ambiguous = [
+      { name: 'Most active', section: 'MY SCREENS' },
+      { name: 'Most active', section: 'POPULAR SCREENS' },
+    ];
+    const { deps } = makeFullDeps({ active: 'Cam Prefilter', rows: ambiguous });
+    const res = await get({ screenName: 'Most active', _deps: deps });
+    assert.equal(res.success, false);
+    assert.match(res.error, /ambiguous/i);
+    assert.equal(res.matches.length, 2);
+  });
+
+  it('rejects a blank screenName', async () => {
+    const { deps } = makeFullDeps({});
+    const res = await get({ screenName: '   ', _deps: deps });
+    assert.equal(res.success, false);
+    assert.match(res.error, /required/i);
+  });
+
+  it('fails loudly when the title does not change after selecting', async () => {
+    const { deps } = makeFullDeps({ active: 'Cam Prefilter', selectLands: false });
+    const res = await get({ screenName: 'Pre-market most active', _deps: deps });
+    assert.equal(res.success, false);
+    assert.match(res.error, /but the active screen is/i);
+  });
+
+  it('reports incomplete when the results overflow', async () => {
+    const { deps } = makeFullDeps({ active: 'Pre-market most active', overflow: true });
+    const res = await get({ screenName: 'Pre-market most active', _deps: deps });
+    assert.equal(res.complete, false);
+    assert.equal(res.count, 3, 'still reports what it did get');
+  });
+
+  it('closes the panel it opened', async () => {
+    const { deps, state } = makeFullDeps({ startOpen: false, active: 'Pre-market most active' });
+    await get({ screenName: 'Pre-market most active', _deps: deps });
+    assert.equal(state.closed, true, 'panel closed again');
+  });
+
+  it('leaves a panel it did not open alone', async () => {
+    const { deps, state } = makeFullDeps({ startOpen: true, active: 'Pre-market most active' });
+    await get({ screenName: 'Pre-market most active', _deps: deps });
+    assert.equal(state.closed, false, 'user panel untouched');
+    assert.equal(state.open, true);
+  });
+
+  it('restores panel state even when the call fails', async () => {
+    const { deps, state } = makeFullDeps({ startOpen: false, active: 'Cam Prefilter' });
+    const res = await get({ screenName: '__no_such_screen__', _deps: deps });
+    assert.equal(res.success, false);
+    assert.equal(state.closed, true, 'panel closed despite the failure');
+    assert.ok(state.escapes > 0, 'the dialog was dismissed');
   });
 });
